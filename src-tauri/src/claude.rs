@@ -31,6 +31,18 @@ const MAX_SCANNED: usize = 30;
 pub const RESUME_GRACE: TimeDelta = TimeDelta::minutes(10);
 /// Missed resets older than this are old news.
 const MISSED_FOR: TimeDelta = TimeDelta::hours(2);
+/// Tools that exist to ask the user something: a question, or a plan to approve.
+const ASKING_TOOLS: &[&str] = &["AskUserQuestion", "ExitPlanMode"];
+/// File edits finish within seconds (2 of about 4,700 took over 30 s), so one
+/// still open after APPROVAL_AFTER is waiting at the permission prompt. Other
+/// tools can't be told apart this way: a quiet Bash command can run for many
+/// minutes without writing anything.
+const QUICK_TOOLS: &[&str] = &["Edit", "MultiEdit", "Write", "NotebookEdit"];
+const APPROVAL_AFTER: Duration = Duration::from_secs(60);
+/// Any other open tool call counts as running for this long, even with
+/// nothing written: tool calls have taken up to about 70 minutes. After
+/// that the session most likely stopped mid-call.
+const RUNNING_FOR: Duration = Duration::from_secs(2 * 3600);
 
 /// For pasting into a Claude session when sessions don't continue after a reset.
 pub const FIX_PROMPT: &str = "My Claude Code sessions stop when they hit the usage limit and don't continue after it resets, even though my Mac stays awake overnight. Please check and fix this:
@@ -46,8 +58,36 @@ pub struct Session {
     pub title: String,
     pub project: String,
     pub idle_secs: u64,
+    /// Working: a tool call is running, or there was other activity within
+    /// the idle time. Never while it's waiting on the user or done.
     pub active: bool,
     pub limit: Option<LimitState>,
+    pub turn: Option<Turn>,
+}
+
+/// Where a session's turn stands, read from the end of its transcript.
+/// None when the records don't say, e.g. a request in flight: then the idle
+/// time decides.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Turn {
+    /// It asked a question, or wants a plan approved.
+    Question,
+    /// A file edit has waited long enough that it must be at the permission prompt.
+    Approval,
+    /// A tool call is running.
+    Running,
+    /// Its reply ended the turn, or the user interrupted it.
+    Done,
+}
+
+/// A session waiting for an answer or an approval, for notifications.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ask {
+    pub session: PathBuf,
+    pub turn: Turn,
+    /// When Claude asked.
+    pub since: SystemTime,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -83,10 +123,16 @@ pub struct ClaudeInfo {
     /// All Claude process trees together, for display. Activity goes by the
     /// busiest single tree instead.
     pub busy_cpu: f32,
+    /// Some session is working, or a process tree was busy within the idle time.
     pub active: bool,
     /// Seconds since the last transcript write or busy process tree.
     pub idle_secs: Option<u64>,
     pub sessions: Vec<Session>,
+    /// Sessions waiting for an answer or an approval, including ones too old
+    /// for the session list.
+    pub needs_you: usize,
+    #[serde(skip)]
+    pub asks: Vec<Ask>,
     pub limit: Option<Limit>,
     /// `autoContinueAtUsageLimit` from ~/.claude/settings.json (on unless set
     /// to false). The desktop app's own checkbox lives elsewhere.
@@ -101,6 +147,9 @@ struct Meta {
     project: String,
     limit: Option<LimitHit>,
     last_record: Option<SystemTime>,
+    /// See `turn_state`. An Approval here is only a file edit still open;
+    /// `poll` decides when it has waited long enough.
+    turn: Option<(Turn, SystemTime)>,
 }
 
 pub struct Watcher {
@@ -138,7 +187,7 @@ impl Watcher {
         }
         // A session's activity is its newest timestamped record or subagent
         // write, not the file's modified time (see `last_record_time`).
-        let mut recent: Vec<(Meta, SystemTime)> = Vec::new();
+        let mut recent: Vec<(PathBuf, Meta, SystemTime)> = Vec::new();
         for t in transcripts(&self.projects)
             .into_iter()
             .filter(|t| since(t.written) < RECENT)
@@ -146,29 +195,47 @@ impl Watcher {
         {
             let meta = self.describe(&t.path);
             if let Some(at) = meta.last_record.max(t.subagents).filter(|at| since(*at) < RECENT) {
-                recent.push((meta, at));
+                recent.push((t.path, meta, at));
             }
         }
-        recent.sort_by(|a, b| b.1.cmp(&a.1));
-        let last = recent.first().map(|r| r.1).max(self.last_busy);
+        recent.sort_by(|a, b| b.2.cmp(&a.2));
+        let last = recent.first().map(|r| r.2).max(self.last_busy);
         let idle_secs = last.map(|t| since(t).as_secs());
-        let active = running && last.is_some_and(|t| since(t) < idle_after);
+        let mut active = running && self.last_busy.is_some_and(|t| since(t) < idle_after);
 
         let local_now = Local::now();
         let mut sessions = Vec::new();
         let mut hits = Vec::new();
-        for (i, (meta, at)) in recent.into_iter().enumerate() {
+        let mut asks = Vec::new();
+        for (i, (path, meta, at)) in recent.into_iter().enumerate() {
             let state = meta.limit.as_ref().and_then(|h| limit_state(h, local_now));
             if state.is_some() {
                 hits.extend(meta.limit.clone());
             }
+            // Without a process, nothing is running or left to answer.
+            let turn = meta.turn.filter(|_| running).and_then(|(t, at)| match t {
+                Turn::Approval if since(at) < APPROVAL_AFTER => Some((Turn::Running, at)),
+                Turn::Running if since(at) >= RUNNING_FOR => None,
+                t => Some((t, at)),
+            });
+            if let Some((t @ (Turn::Question | Turn::Approval), asked)) = turn {
+                asks.push(Ask { session: path, turn: t, since: asked });
+            }
+            let session_active = running
+                && match turn {
+                    Some((Turn::Running, _)) => true,
+                    Some(_) => false,
+                    None => since(at) < idle_after,
+                };
+            active |= session_active;
             if i < MAX_SESSIONS {
                 sessions.push(Session {
                     title: meta.title,
                     project: meta.project,
                     idle_secs: since(at).as_secs(),
-                    active: running && since(at) < idle_after,
+                    active: session_active,
                     limit: state,
+                    turn: turn.map(|t| t.0),
                 });
             }
         }
@@ -181,6 +248,8 @@ impl Watcher {
             active,
             idle_secs,
             sessions,
+            needs_you: asks.len(),
+            asks,
             limit,
             auto_continue,
             fix_prompt: FIX_PROMPT,
@@ -251,6 +320,7 @@ impl Watcher {
             project,
             limit: unresumed_limit(&tail),
             last_record: last_record_time(&tail),
+            turn: turn_state(&tail),
         };
         self.meta.insert(path.to_path_buf(), meta.clone());
         meta
@@ -514,6 +584,98 @@ fn last_record_time(tail: &str) -> Option<SystemTime> {
     })
 }
 
+/// Where the session's turn stands, and since when, from the newest
+/// conversation records. Claude Code writes nothing while a tool runs or a
+/// question or permission prompt is open, so an open tool call is a question
+/// if the tool asks the user, may be at the permission prompt if it's a file
+/// edit, and is running otherwise. A reply that ended the turn, or an
+/// interruption, is done. Usage limits are reported separately.
+fn turn_state(tail: &str) -> Option<(Turn, SystemTime)> {
+    let mut answered: HashSet<String> = HashSet::new();
+    // The reply whose tool calls all have results. Its other parts (one
+    // record per content block) may still hold an open call.
+    let mut reply_id: Option<String> = None;
+    for line in tail.lines().rev() {
+        // Untimed records are bookkeeping, not conversation.
+        if !line.contains("\"timestamp\"") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let blocks = v.pointer("/message/content").and_then(|c| c.as_array());
+        let blocks = blocks.map(Vec::as_slice).unwrap_or_default();
+        match v.get("type").and_then(|t| t.as_str()).unwrap_or_default() {
+            "assistant" => {
+                if v.get("isApiErrorMessage").and_then(|e| e.as_bool()) == Some(true) {
+                    return None;
+                }
+                let id = v.pointer("/message/id").and_then(|i| i.as_str());
+                if reply_id.is_some() && reply_id.as_deref() != id {
+                    return None; // an earlier reply: its results are in
+                }
+                let at = timestamp(&v)?;
+                let mut calls = blocks.iter().filter(|b| b["type"] == "tool_use").peekable();
+                if calls.peek().is_none() {
+                    if reply_id.is_some() {
+                        continue;
+                    }
+                    let ended = v.pointer("/message/stop_reason").and_then(|r| r.as_str()) == Some("end_turn");
+                    return ended.then_some((Turn::Done, at));
+                }
+                for call in calls {
+                    if answered.contains(call["id"].as_str().unwrap_or_default()) {
+                        continue;
+                    }
+                    let name = call["name"].as_str().unwrap_or_default();
+                    return Some((
+                        if ASKING_TOOLS.contains(&name) {
+                            Turn::Question
+                        } else if QUICK_TOOLS.contains(&name) {
+                            Turn::Approval
+                        } else {
+                            Turn::Running
+                        },
+                        at,
+                    ));
+                }
+                reply_id = Some(id.unwrap_or_default().to_string());
+            }
+            "user" => {
+                let results: Vec<_> = blocks
+                    .iter()
+                    .filter(|b| b["type"] == "tool_result")
+                    .filter_map(|b| b["tool_use_id"].as_str())
+                    .collect();
+                // Pressing Esc writes this, alongside any cut-off tool result.
+                let interrupted = blocks.iter().any(|b| {
+                    b["type"] == "text" && b["text"].as_str().is_some_and(|t| t.starts_with("[Request interrupted by user"))
+                });
+                if interrupted {
+                    return timestamp(&v).map(|at| (Turn::Done, at));
+                }
+                if results.is_empty() || reply_id.is_some() {
+                    return None; // a prompt Claude is working on
+                }
+                answered.extend(results.into_iter().map(str::to_owned));
+            }
+            // Written after a reply that ends the turn.
+            "system" if matches!(v["subtype"].as_str(), Some("stop_hook_summary" | "turn_duration")) => {}
+            "system" => return None,
+            // A request in flight, or a message waiting its turn.
+            t if t.starts_with("api-request") || t == "queue-operation" => return None,
+            // Hook results, file snapshots and the like.
+            _ => {}
+        }
+    }
+    None
+}
+
+fn timestamp(v: &serde_json::Value) -> Option<SystemTime> {
+    let ts = v.get("timestamp")?.as_str()?;
+    DateTime::parse_from_rfc3339(ts).ok().map(SystemTime::from)
+}
+
 fn mtime(path: &Path) -> Option<SystemTime> {
     fs::metadata(path).and_then(|m| m.modified()).ok()
 }
@@ -728,6 +890,68 @@ mod tests {
         assert_eq!(limit_state(&model, mins(0)), Some(LimitState::Missed));
         let s = summarize_limits(&[hit.clone(), model], mins(-30)).unwrap();
         assert_eq!((s.state, s.sessions, s.resets_at), (LimitState::Waiting, 1, Some(reset)));
+    }
+
+    /// Records shaped like Claude Code's, one per content block.
+    fn call(id: &str, name: &str, at: &str) -> String {
+        format!(r#"{{"type":"assistant","timestamp":"2026-11-02T13:{at}.000Z","message":{{"id":"msg_{at}","content":[{{"type":"tool_use","id":"{id}","name":"{name}","input":{{}}}}],"stop_reason":"tool_use"}}}}"#)
+    }
+    fn result(id: &str) -> String {
+        format!(r#"{{"type":"user","timestamp":"2026-11-02T13:30:00.000Z","message":{{"role":"user","content":[{{"tool_use_id":"{id}","type":"tool_result","content":"ok"}}]}}}}"#)
+    }
+    const HOOK: &str = r#"{"type":"attachment","attachment":{"type":"hook_success","hookEvent":"PreToolUse"},"timestamp":"2026-11-02T13:22:47.000Z"}"#;
+    const ENDED: &str = r#"{"type":"assistant","timestamp":"2026-11-02T13:27:40.000Z","message":{"id":"msg_end","content":[{"type":"text","text":"Done. Want me to push it?"}],"stop_reason":"end_turn"}}"#;
+    const STOP_HOOKS: &str = r#"{"type":"system","subtype":"stop_hook_summary","timestamp":"2026-11-02T13:27:43.000Z"}"#;
+    const PROMPT: &str = r#"{"type":"user","timestamp":"2026-11-02T13:40:00.000Z","message":{"role":"user","content":"yes, push it"}}"#;
+    const REQUEST: &str = r#"{"type":"api-request","timestamp":"2026-11-02T13:30:01.000Z"}"#;
+
+    fn turn(lines: &[&str]) -> Option<Turn> {
+        turn_state(&(lines.join("\n") + "\n")).map(|t| t.0)
+    }
+
+    /// The "Roleplay request scenario" session: a question nobody answered
+    /// yet looked like work for 15 minutes, then like idle.
+    #[test]
+    fn open_question_waits_for_the_user() {
+        let ask = call("toolu_q", "AskUserQuestion", "22:46");
+        let tail = format!("{ask}\n{HOOK}\n{{\"type\":\"custom-title\",\"customTitle\":\"Roleplay\"}}\n");
+        let (t, at) = turn_state(&tail).unwrap();
+        assert_eq!(t, Turn::Question);
+        assert_eq!(at, SystemTime::from(DateTime::parse_from_rfc3339("2026-11-02T13:22:46Z").unwrap()));
+        assert_eq!(turn(&[&call("toolu_p", "ExitPlanMode", "22:46")]), Some(Turn::Question));
+        assert_eq!(turn(&[&ask, &result("toolu_q"), REQUEST]), None);
+    }
+
+    #[test]
+    fn open_file_edit_may_need_approval_but_a_command_is_running() {
+        assert_eq!(turn(&[&call("toolu_w", "Write", "28:53"), HOOK]), Some(Turn::Approval));
+        assert_eq!(turn(&[&call("toolu_b", "Bash", "28:53"), HOOK]), Some(Turn::Running));
+        assert_eq!(turn(&[&call("toolu_w", "Write", "28:53"), &result("toolu_w")]), None);
+    }
+
+    /// The "Insomnia with AI twist" session: Esc during a command.
+    #[test]
+    fn interrupted_turn_is_done() {
+        let esc = r#"{"type":"user","timestamp":"2026-10-31T08:51:39.000Z","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}"#;
+        let bash = call("toolu_b", "Bash", "28:53");
+        assert_eq!(turn(&[&bash, &result("toolu_b"), esc]), Some(Turn::Done));
+    }
+
+    #[test]
+    fn ended_turn_is_done() {
+        assert_eq!(turn(&[ENDED, STOP_HOOKS, r#"{"type":"cost-state"}"#]), Some(Turn::Done));
+        assert_eq!(turn(&[ENDED, STOP_HOOKS, PROMPT]), None);
+        assert_eq!(turn(&[ENDED, REQUEST]), None);
+        assert_eq!(turn(&[LIMIT]), None); // reported as a usage limit instead
+    }
+
+    /// Two calls in one reply, written as two records: the first is still open.
+    #[test]
+    fn parallel_calls_wait_for_the_open_one() {
+        let one = call("toolu_1", "AskUserQuestion", "29:00");
+        let two = call("toolu_2", "Read", "29:00");
+        assert_eq!(turn(&[&one, &two, &result("toolu_2")]), Some(Turn::Question));
+        assert_eq!(turn(&[&one, &two, &result("toolu_2"), &result("toolu_1")]), None);
     }
 
     #[test]

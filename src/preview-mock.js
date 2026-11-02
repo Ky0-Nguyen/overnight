@@ -1,6 +1,6 @@
 // Stand-in for the Tauri backend when index.html is opened in a browser.
 // Never loaded inside the app. Query options: ?state=off|on|standby&theme=dark
-// &limit=waiting|missed&auto=off&phone=on&firstrun (never armed before)
+// &limit=waiting|missed&auto=off&ask=question|approval&phone=on&firstrun (never armed before)
 // For screenshots: &shot (just the popover, on a transparent page), &tab=storage|log,
 // &scrollto=<element id>, &open=<details id>, &padend (room after the last section,
 // so even it can scroll to the top).
@@ -109,6 +109,18 @@ if (limitMode) {
     snap.detail = snap.claude.auto_continue === false
       ? `Auto-continue is off in Claude Code, so Claude won't continue by itself at ${at}.`
       : `Claude should continue at ${at}. The Mac stays awake until 10 minutes after.`;
+  }
+}
+
+// &ask=question|approval: the second session is waiting for an answer, the first is done.
+const askMode = params.get("ask");
+if (askMode) {
+  snap.claude.needs_you = 1;
+  Object.assign(snap.claude.sessions[1], { turn: askMode, active: false, idle_secs: 260 });
+  Object.assign(snap.claude.sessions[0], { turn: "done", active: false, idle_secs: 90 });
+  if (mode === "on") {
+    snap.status = "Awake, Claude needs you";
+    snap.detail = "A session is waiting for you. The Mac sleeps once nothing else is working.";
   }
 }
 

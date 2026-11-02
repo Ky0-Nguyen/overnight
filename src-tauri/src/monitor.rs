@@ -3,7 +3,7 @@
 //! popover and the menu bar icon.
 
 use crate::{
-    claude::{ClaudeInfo, LimitState, Watcher},
+    claude::{Ask, ClaudeInfo, LimitState, Turn, Watcher},
     events, helper, phone,
     settings::{Mode, Settings},
     storage,
@@ -38,6 +38,9 @@ const MISMATCH_NOTE_AFTER: Duration = Duration::from_secs(15);
 const MISMATCH_AFTER: Duration = Duration::from_secs(50);
 const MISMATCH: &str = "macOS still reports normal sleep, so closing the lid would sleep the Mac. \
 Press Let it sleep, then Keep awake tonight again.";
+/// Questions older than this when Overnight first sees them (say, from
+/// before it started) are shown in the popover but not announced.
+const ASK_NOTE_WITHIN: Duration = Duration::from_secs(30 * 60);
 
 pub type Shared = Arc<Mutex<Core>>;
 
@@ -106,6 +109,8 @@ pub struct Core {
     claude_active: bool,
     /// The usage-limit state seen last tick, to log and notify on changes.
     limit_seen: Option<(LimitState, Option<DateTime<Local>>)>,
+    /// Questions and approvals seen last tick, so each is announced once.
+    asks_seen: Vec<Ask>,
     watcher: Watcher,
     prev_lid: Option<bool>,
     prev_ac: Option<bool>,
@@ -149,6 +154,7 @@ impl Core {
             holding: false,
             claude_active: false,
             limit_seen: None,
+            asks_seen: Vec::new(),
             prev_lid: None,
             prev_ac: None,
             disk_low: false,
@@ -334,7 +340,7 @@ pub fn tick(app: &AppHandle, shared: &Shared) {
             if claude.active {
                 events::append(&log, "claude_active", "Claude is working", None);
             } else {
-                events::append(&log, "claude_idle", format!("Claude idle for {} min", s.idle_minutes), None);
+                events::append(&log, "claude_idle", "Claude is done or waiting for you", None);
             }
         }
         let went_idle = core.claude_active && !claude.active;
@@ -355,8 +361,23 @@ pub fn tick(app: &AppHandle, shared: &Shared) {
                 .limit
                 .as_ref()
                 .is_some_and(|l| l.state == LimitState::Waiting && l.resets_at.is_some());
-        // A usage limit has its own notes, so "Claude is idle" would only repeat them.
-        let limit_pending = claude.limit.is_some();
+        // A usage limit or a question has its own notes, so "Claude is idle"
+        // would only repeat them.
+        let limit_pending = claude.limit.is_some() || claude.needs_you > 0;
+
+        let fresh: Vec<&Ask> = claude
+            .asks
+            .iter()
+            .filter(|a| !core.asks_seen.contains(a))
+            .filter(|a| a.since.elapsed().unwrap_or_default() < ASK_NOTE_WITHIN)
+            .collect();
+        if let Some((title, body)) = ask_note(&fresh) {
+            events::append(&log, "claude_asks", title.clone(), None);
+            if s.notify_claude_idle {
+                notes.push((title, body));
+            }
+        }
+        core.asks_seen = claude.asks.clone();
 
         let mut released_for_idle = false;
         if core.want_armed {
@@ -384,10 +405,7 @@ pub fn tick(app: &AppHandle, shared: &Shared) {
                         if s.notify_claude_idle && !limit_pending {
                             notes.push((
                                 "Claude is idle".into(),
-                                format!(
-                                    "No activity for {} min, so the Mac can sleep now. It's usually done or waiting for your reply.",
-                                    s.idle_minutes
-                                ),
+                                "Claude is done or waiting for you, so the Mac can sleep now.".into(),
                             ));
                         }
                     }
@@ -407,7 +425,7 @@ pub fn tick(app: &AppHandle, shared: &Shared) {
         if went_idle && s.notify_claude_idle && !released_for_idle && !waiting && !limit_pending {
             notes.push((
                 "Claude is idle".into(),
-                format!("No activity for {} min. It's usually done or waiting for your reply.", s.idle_minutes),
+                "Claude is done or waiting for you.".into(),
             ));
         }
 
@@ -577,6 +595,30 @@ fn should_hold(mode: Mode, claude_active: bool, grace: bool, waiting_for_reset: 
 
 type Note = (String, String);
 
+/// What to say about sessions that just asked something. Like every note it
+/// may go to the phone, so it never names a session or project.
+fn ask_note(fresh: &[&Ask]) -> Option<Note> {
+    let first = fresh.first()?;
+    let n = fresh.len();
+    let same = fresh.iter().all(|a| a.turn == first.turn);
+    Some(match (first.turn, same, n) {
+        (Turn::Approval, true, 1) => (
+            "Claude needs your approval".into(),
+            "A session is waiting for you to allow a file change. It can't go on until you do.".into(),
+        ),
+        (Turn::Approval, true, _) => (
+            "Claude needs your approval".into(),
+            format!("{n} sessions are waiting for you to allow a file change."),
+        ),
+        (_, true, 1) => (
+            "Claude is asking you something".into(),
+            "A session is waiting for your answer. It can't go on until you reply.".into(),
+        ),
+        (_, true, _) => ("Claude is asking you something".into(), format!("{n} sessions are waiting for your answer.")),
+        _ => ("Claude needs you".into(), format!("{n} sessions are waiting for your answer or approval.")),
+    })
+}
+
 /// What to log and notify when the usage-limit picture changes.
 fn limit_change(
     before: Option<(LimitState, Option<DateTime<Local>>)>,
@@ -675,11 +717,13 @@ and Overnight's battery and heat guards aren't watching."
             ("Normal sleep", "Closing the lid puts the Mac to sleep.".to_string())
         }
     } else if !core.holding {
+        let why = if claude.needs_you > 0 { "Claude is waiting for you" } else { "Claude is idle" };
         (
             "The Mac can sleep",
-            "Claude is idle, so closing the lid sleeps the Mac. If Claude starts working while the lid \
+            format!(
+                "{why}, so closing the lid sleeps the Mac. If Claude starts working while the lid \
 is open, Overnight keeps it awake again."
-                .to_string(),
+            ),
         )
     } else {
         let stop = core.stops_at.map(system::clock);
@@ -702,6 +746,13 @@ is open, Overnight keeps it awake again."
                 } else {
                     format!("Claude should continue {at}. The Mac stays awake until 10 minutes after.")
                 },
+            ),
+            (Mode::Claude, _) if claude.needs_you > 0 => (
+                "Awake, Claude needs you",
+                format!(
+                    "{} waiting for you. The Mac sleeps once nothing else is working.",
+                    if claude.needs_you == 1 { "A session is" } else { "Sessions are" }
+                ),
             ),
             (Mode::Claude, _) if claude.active => (
                 "Awake while Claude works",
@@ -784,6 +835,16 @@ mod tests {
         assert!(should_hold(Mode::Claude, false, true, false));
         assert!(should_hold(Mode::Claude, false, false, true)); // waiting out a usage limit
         assert!(!should_hold(Mode::Claude, false, false, false));
+    }
+
+    #[test]
+    fn ask_notes() {
+        let ask = |turn| Ask { session: PathBuf::from("/s.jsonl"), turn, since: std::time::SystemTime::now() };
+        let (q, a) = (ask(Turn::Question), ask(Turn::Approval));
+        assert!(ask_note(&[]).is_none());
+        assert_eq!(ask_note(&[&q]).unwrap().0, "Claude is asking you something");
+        assert!(ask_note(&[&a, &a]).unwrap().1.starts_with("2 sessions"));
+        assert_eq!(ask_note(&[&q, &a]).unwrap().0, "Claude needs you");
     }
 
     fn limited(state: LimitState, resets_at: Option<DateTime<Local>>) -> ClaudeInfo {

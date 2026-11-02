@@ -113,6 +113,8 @@ function renderHero(s) {
 
 // What, if anything, needs the user: only what Overnight actually knows.
 function needsYou(s) {
+  const asks = s.claude.needs_you;
+  if (asks) return asks === 1 ? "A session is waiting for you" : `${asks} sessions are waiting for you`;
   const limit = s.claude.limit;
   if (!limit) return null;
   if (limit.state === "missed") return limit.sessions === 1 ? "A session needs you" : `${limit.sessions} sessions need you`;
@@ -143,8 +145,8 @@ function renderSettings() {
   const claude = s.mode === "claude";
   $("mode-hint").textContent = claude
     ? s.wait_for_reset
-      ? `Stays awake while Claude works or waits for a usage limit to reset. Sleeps once Claude has been idle for ${s.idle_minutes} min.`
-      : `Stays awake while Claude works. Sleeps once Claude has been idle for ${s.idle_minutes} min, even with a usage limit about to reset.`
+      ? `Stays awake while Claude works or waits for a usage limit to reset. Sleeps once Claude is done, waiting for you, or idle for ${s.idle_minutes} min.`
+      : `Stays awake while Claude works. Sleeps once Claude is done, waiting for you, or idle for ${s.idle_minutes} min, even with a usage limit about to reset.`
     : "Stays awake until the stop time, a low battery or heat, whichever comes first.";
   $("wait-reset-row").hidden = !claude;
   $("wait-reset").checked = s.wait_for_reset;
@@ -165,7 +167,9 @@ function renderSettings() {
 
 // One word for what Claude is doing overall. "Idle" means no activity for
 // the idle time; a usage limit says paused (waiting for the reset) or stopped.
+// A question or an approval outranks the rest: that session can't go on until it's answered.
 const CLAUDE_PILL = {
+  "needs you": "pill warn",
   working: "pill on",
   paused: "pill warn",
   stopped: "pill bad",
@@ -174,6 +178,7 @@ const CLAUDE_PILL = {
 };
 
 function claudeState(c) {
+  if (c.needs_you) return "needs you";
   if (c.active) return "working";
   if (c.limit) return c.limit.state === "waiting" ? "paused" : "stopped";
   return c.processes ? "idle" : "not running";
@@ -193,9 +198,12 @@ function renderClaude(c) {
     const text = el("div");
     text.append(el("div", "s-title", x.title), el("span", "s-project", x.project));
     const stopped = x.limit === "missed";
+    const asking = x.turn === "question" || x.turn === "approval";
     const right = x.limit
       ? el("span", stopped ? "s-limit missed" : "s-limit", stopped ? "stopped" : "paused")
-      : el("span", "s-ago", ago(x.idle_secs));
+      : asking
+        ? el("span", "s-limit", x.turn === "question" ? "asking you" : "needs approval")
+        : el("span", "s-ago", ago(x.idle_secs));
     const dot = el("span", x.active ? "dot on" : "dot");
     // Working is shown by colour, so say it in words too.
     if (x.active) {
@@ -205,11 +213,16 @@ function renderClaude(c) {
       dot.setAttribute("aria-hidden", "true");
     }
     li.append(dot, text, right);
-    const why = !x.limit
-      ? ""
-      : stopped
+    const why = x.limit
+      ? stopped
         ? "\nStopped on the usage limit and didn't continue after the reset."
-        : "\nPaused on the usage limit until it resets.";
+        : "\nPaused on the usage limit until it resets."
+      : {
+          question: "\nAsked you something and is waiting for your answer.",
+          approval: "\nWaiting for you to allow a file change.",
+          running: "\nRunning a tool.",
+          done: "\nDone.",
+        }[x.turn] || "";
     li.title = `${x.title}\n${x.project}${why}`;
     list.append(li);
   }
@@ -419,6 +432,7 @@ const KIND_DOT = {
   hold_on: "accent",
   cleanup: "accent",
   claude_active: "green",
+  claude_asks: "orange",
   guard: "orange",
   storage_low: "orange",
   phone_failed: "orange",
@@ -529,11 +543,12 @@ function bind() {
     if (link) invoke("open_docs", { section: link.dataset.docs || null });
   });
 
+  // Points at the usage-limit callout, or at the sessions waiting for an answer.
   $("hero-note").addEventListener("click", () => {
     showTab("tonight");
-    const limit = $("limit");
-    limit.scrollIntoView({ block: "start", behavior: reducedMotion.matches ? "auto" : "smooth" });
-    limit.focus({ preventScroll: true });
+    const target = state?.claude.needs_you ? $("sessions") : $("limit");
+    target.scrollIntoView({ block: "start", behavior: reducedMotion.matches ? "auto" : "smooth" });
+    if (target.id === "limit") target.focus({ preventScroll: true });
   });
   $("morning-hide").addEventListener("click", () => {
     try {

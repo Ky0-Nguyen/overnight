@@ -10,7 +10,7 @@ Overnight is a macOS menu bar app that keeps a MacBook awake with the lid closed
 
 ## What it does
 
-Press Keep awake tonight before you close the lid. In While Claude works mode the Mac stays awake while your Claude Code sessions are busy or waiting for a usage limit to reset, then sleeps once Claude has been idle for 15 minutes. All night mode stays awake until your stop time, 8:00 AM by default. If you close the lid while Claude is already idle, the Mac sleeps right away.
+Press Keep awake tonight before you close the lid. In While Claude works mode the Mac stays awake while your Claude Code sessions are busy or waiting for a usage limit to reset, then sleeps once Claude is done, waiting for you, or idle for 15 minutes. All night mode stays awake until your stop time, 8:00 AM by default. If you close the lid while Claude is already idle, the Mac sleeps right away.
 
 On battery power, Overnight lets the Mac sleep once the charge drops below 10%, and it does the same if macOS reports that the Mac is running hot. You get a notification when that happens.
 
@@ -37,6 +37,16 @@ Nothing is installed system-wide. There's no sudoers entry, launch daemon or ker
 Claude counts as working when a Claude Code process is running and one of two things is true: a session under `~/.claude/projects` recorded something within the idle time, or one session's process tree, including its builds, tests and tools, has used at least 20% of a CPU core for 15 seconds. Each session counts on its own, because a dozen idle sessions together can pass 20% while none of them is doing anything. Sessions in Terminal and in the Claude desktop app both count.
 
 A recorded event is a timestamped record, such as a prompt, a reply, a tool result or a retry, or a write by one of the session's subagents. Overnight ignores the transcript file's modified time, because the Claude desktop app also appends untimed bookkeeping (titles, cost, artifact state) to sessions nobody is working in.
+
+### Done, waiting for you, or working
+
+Claude Code writes nothing while a tool runs or a question or permission prompt is open, so Overnight reads where each session's turn stands from its newest conversation records:
+
+- **Waiting for you:** an `AskUserQuestion` or `ExitPlanMode` call with no result yet, or an Edit or Write call still open after a minute. File edits finish within seconds, so that one is at the permission prompt.
+- **Working:** any other open tool call, for up to two hours even if it writes nothing (tool calls have taken up to about 70 minutes; after two hours the session most likely stopped mid-call). Otherwise, activity within the idle time.
+- **Done:** a reply that ended the turn, or a turn you interrupted.
+
+In While Claude works mode the Mac stays awake only while some session is working or a process tree is busy, so it can sleep as soon as everything is done or waiting for you. A question or an approval turns the Claude pill to "needs you" and sends a notification, on the phone too when phone alerts are on.
 
 ## Usage limits
 
