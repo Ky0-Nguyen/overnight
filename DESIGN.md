@@ -494,5 +494,5 @@ Every drawing's resting state is its last frame, so without JavaScript or under 
 - **Don't** fill a selected tab or segment with the accent; raise it on the card colour.
 - **Don't** use the system orange, green or red fills as small text on light grounds.
 - **Don't** show invented users, numbers or press.
-- **Don't** put screenshots, code blocks or tables in the docs; technical material lives in README.md.
+- **Don't** put screenshots, code blocks or tables in the docs; technical material lives in ARCHITECTURE.md and CONTRIBUTING.md.
 - **Don't** add shadows to cards and groups; use a hairline.

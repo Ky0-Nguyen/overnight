@@ -35,7 +35,7 @@ let snap = {
   stops_at: null,
   status: { on: "Awake while Claude works", standby: "The Mac can sleep", off: "Normal sleep" }[mode],
   detail: {
-    on: "The lid can close. Sleeps after 15 min without activity, or at 8:00 AM.",
+    on: "The lid can close. Sleeps once Claude is done or idle for 15 min, or at 8:00 AM.",
     standby: "Claude is idle, so closing the lid sleeps the Mac. If Claude starts working while the lid is open, Overnight keeps it awake again.",
     off: "Closing the lid puts the Mac to sleep.",
   }[mode],
