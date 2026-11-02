@@ -448,7 +448,6 @@ h2 .link {
 }
 
 input[type="number"],
-input[type="time"],
 input[type="text"],
 textarea {
   font: inherit;
@@ -459,6 +458,12 @@ textarea {
   padding: 3px 6px;
   -webkit-user-select: text;
   user-select: text;
+}
+
+/* A native pop-up menu, which WebKit draws like any macOS one. */
+select {
+  font: inherit;
+  color: var(--text);
 }
 
 input[type="number"] {
@@ -570,6 +575,72 @@ input[type="checkbox"]:not(.switch) {
 .sub {
   font-size: 11px;
   color: var(--muted);
+}
+
+/* Notifications: a row per kind, a checkbox for each place it can go. */
+.alerts {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.alerts th,
+.alerts td {
+  padding: 0;
+  font-weight: normal;
+  text-align: left;
+}
+
+/* The column names stay in view while the rows scroll under them. */
+.alerts thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding-bottom: 2px;
+  background: var(--card);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.alerts thead th + th,
+.alerts td {
+  width: 48px;
+  text-align: center;
+}
+
+.alerts tbody tr:not(.alerts-group) > * {
+  border-top: 1px solid var(--line);
+}
+
+.alerts .label {
+  padding: 8px 0;
+}
+
+/* Each checkbox's whole cell takes the click, at the popover's row height. */
+.alert-hit {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+}
+
+.alerts .sub {
+  display: block;
+  margin-top: 1px;
+}
+
+.alerts-group th {
+  padding: 10px 0 3px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.alerts.no-phone .phone-col {
+  display: none;
+}
+
+.phone-rows {
+  margin-top: 8px;
 }
 
 /* Phone alerts: a row whose field sits under its label. */

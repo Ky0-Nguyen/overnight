@@ -1,6 +1,6 @@
 # Overnight
 
-Overnight is a macOS menu bar app that keeps a MacBook awake with the lid closed while Claude Code works. It lets the Mac sleep again once Claude goes idle, the battery runs low, the Mac gets hot or your stop time comes.
+Overnight is a macOS menu bar app that keeps a MacBook awake with the lid closed while Claude Code works. It lets the Mac sleep again once Claude is done or waiting for you, the battery runs low, the Mac gets hot or your stop time comes.
 
 [Read the documentation](https://dienp.github.io/overnight/), or report a problem through [GitHub issues](https://github.com/dienp/overnight/issues) or Report a Problem in the menu bar icon's menu. It runs on macOS 12 or later and is built with Tauri 2: Rust underneath, with a plain HTML, CSS and JavaScript popover.
 
@@ -10,17 +10,17 @@ Overnight is a macOS menu bar app that keeps a MacBook awake with the lid closed
 
 ## What it does
 
-Press Keep awake tonight before you close the lid. In While Claude works mode the Mac stays awake while your Claude Code sessions are busy or waiting for a usage limit to reset, then sleeps once Claude is done, waiting for you, or idle for 15 minutes. All night mode stays awake until your stop time, 8:00 AM by default. If you close the lid while Claude is already idle, the Mac sleeps right away.
+Press Keep awake tonight before you close the lid. In While Claude works mode the Mac stays awake while your Claude Code sessions are working, then sleeps once Claude is done, waiting for you, paused on a usage limit, or idle for 15 minutes. All night mode stays awake until your stop time, 8:00 AM by default. If you close the lid while Claude is already idle, the Mac sleeps right away.
 
 On battery power, Overnight lets the Mac sleep once the charge drops below 10%, and it does the same if macOS reports that the Mac is running hot. You get a notification when that happens.
 
-The popover lists your recent Claude sessions and says whether Claude is working, idle, paused on a usage limit, or stopped after one. When a session doesn't continue after its limit resets, Overnight says how to resume it and how to make Claude continue by itself next time.
+The popover lists your recent Claude sessions and says whether Claude is working, asking you something, idle, paused on a usage limit, or stopped after one. When a session doesn't continue after its limit resets, Overnight says how to resume it and how to make Claude continue by itself next time.
 
 The first time you open the popover after a run, it shows how the night went: how long Claude worked, how long the Mac was held awake, the battery change, how the run ended, and any sessions that need you.
 
 Overnight can also:
 
-- send its alerts to your phone through [ntfy](https://ntfy.sh)
+- send its alerts to your phone through [ntfy](https://ntfy.sh), choosing for each kind of alert whether it goes to the Mac, the phone, both or neither
 - warn you when free disk space drops below 30 GB, measure what's taking the space, and hand the cleanup to Claude in Terminal, where you can watch it work
 - keep a log of each night
 
@@ -34,7 +34,7 @@ Nothing is installed system-wide. There's no sudoers entry, launch daemon or ker
 
 ## How Overnight decides Claude is working
 
-Claude counts as working when a Claude Code process is running and one of two things is true: a session under `~/.claude/projects` recorded something within the idle time, or one session's process tree, including its builds, tests and tools, has used at least 20% of a CPU core for 15 seconds. Each session counts on its own, because a dozen idle sessions together can pass 20% while none of them is doing anything. Sessions in Terminal and in the Claude desktop app both count.
+Claude counts as working when a Claude Code process is running and one of two things is true: a session under `~/.claude/projects` is working (see below), or one session's process tree, including its builds, tests and tools, has used at least 20% of a CPU core for 15 seconds. Each session counts on its own, because a dozen idle sessions together can pass 20% while none of them is doing anything. Sessions in Terminal and in the Claude desktop app both count.
 
 A recorded event is a timestamped record, such as a prompt, a reply, a tool result or a retry, or a write by one of the session's subagents. Overnight ignores the transcript file's modified time, because the Claude desktop app also appends untimed bookkeeping (titles, cost, artifact state) to sessions nobody is working in.
 
@@ -62,7 +62,11 @@ Whether Claude continues by itself after the reset depends on these settings, wh
 
 The Claude Code docs cover [waiting for a usage limit to reset](https://code.claude.com/docs/en/interactive-mode.md#wait-for-a-usage-limit-to-reset) and the [autoContinueAtUsageLimit setting](https://code.claude.com/docs/en/settings-reference.md#autocontinueatusagelimit).
 
-The Mac also has to be awake at the reset. A session that sleeps through it for more than about 30 minutes stops at "Press enter to continue". So in While Claude works mode, Overnight stays awake until 10 minutes after a pending reset. You can turn that off with Wait for usage-limit resets.
+Overnight doesn't keep the Mac awake through a reset. In While Claude works mode a session paused on a limit counts as not working, so the Mac can sleep while it waits, and Claude's auto-continue picks the work up after the reset. If a session still hasn't continued 10 minutes after the reset, Overnight tells you and shows how to resume it.
+
+## Notifications
+
+Overnight notifies you when Claude asks you something, is done, hits a usage limit or doesn't continue after one; when it stops keeping the Mac awake (the stop time, low battery or heat, or the helper stopping); when something else changes the sleep setting; and when disk space runs low. Under Notifications, at the bottom of the popover, each kind has a Mac switch and, once phone alerts are on, a Phone switch. All of them start on. Settings from before this list keep their old Notify me when Claude needs me choice for the "is done" alert.
 
 ## Phone alerts
 
@@ -125,7 +129,7 @@ sh scripts/test-helper.sh           # the root helper, with pmset and ioreg stub
 src-tauri/target/debug/overnight --probe   # print live readings as JSON
 ```
 
-To work on the popover without Tauri, serve `src/` (for example with `python3 -m http.server -d src`) and open `index.html`. It loads `preview-mock.js` in place of the backend. Query parameters choose the state: `state=off`, `on` or `standby`; `limit=waiting` or `missed`; `auto=off`; `phone=on`; and `theme=dark`.
+To work on the popover without Tauri, serve `src/` (for example with `python3 -m http.server -d src`) and open `index.html`. It loads `preview-mock.js` in place of the backend. Query parameters choose the state: `state=off`, `on` or `standby`; `limit=waiting` or `missed`; `auto=off`; `ask=question` or `approval`; `phone=on`; and `theme=dark`.
 
 `npm run icons` redraws the menu bar and app icons from `scripts/make-icons.py`.
 

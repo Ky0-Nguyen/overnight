@@ -57,6 +57,9 @@ const HEAD_BYTES: u64 = 64 * 1024;
 pub struct Session {
     pub title: String,
     pub project: String,
+    /// Where to answer it: "Terminal" or "the Claude app", when the
+    /// transcript says.
+    pub place: Option<&'static str>,
     pub idle_secs: u64,
     /// Working: a tool call is running, or there was other activity within
     /// the idle time. Never while it's waiting on the user or done.
@@ -145,6 +148,7 @@ struct Meta {
     len: u64,
     title: String,
     project: String,
+    place: Option<&'static str>,
     limit: Option<LimitHit>,
     last_record: Option<SystemTime>,
     /// See `turn_state`. An Approval here is only a file edit still open;
@@ -207,7 +211,7 @@ impl Watcher {
         let mut sessions = Vec::new();
         let mut hits = Vec::new();
         let mut asks = Vec::new();
-        for (i, (path, meta, at)) in recent.into_iter().enumerate() {
+        for (path, meta, at) in recent {
             let state = meta.limit.as_ref().and_then(|h| limit_state(h, local_now));
             if state.is_some() {
                 hits.extend(meta.limit.clone());
@@ -228,17 +232,20 @@ impl Watcher {
                     None => since(at) < idle_after,
                 };
             active |= session_active;
-            if i < MAX_SESSIONS {
-                sessions.push(Session {
-                    title: meta.title,
-                    project: meta.project,
-                    idle_secs: since(at).as_secs(),
-                    active: session_active,
-                    limit: state,
-                    turn: turn.map(|t| t.0),
-                });
-            }
+            sessions.push(Session {
+                title: meta.title,
+                project: meta.project,
+                place: meta.place,
+                idle_secs: since(at).as_secs(),
+                active: session_active,
+                limit: state,
+                turn: turn.map(|t| t.0),
+            });
         }
+        // Sessions that need the user come first, so the list always shows
+        // them, then the rest by latest activity.
+        sessions.sort_by_key(|s| !matches!(s.turn, Some(Turn::Question | Turn::Approval)) && s.limit.is_none());
+        sessions.truncate(MAX_SESSIONS);
         let limit = summarize_limits(&hits, local_now);
 
         let auto_continue = auto_continue(&self.settings);
@@ -314,10 +321,16 @@ impl Watcher {
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default()
             });
+        let place = match head.lines().find_map(|l| string_field(l, "entrypoint")).as_deref() {
+            Some("cli") => Some("Terminal"),
+            Some("claude-desktop") => Some("the Claude app"),
+            _ => None,
+        };
         let meta = Meta {
             len,
             title,
             project,
+            place,
             limit: unresumed_limit(&tail),
             last_record: last_record_time(&tail),
             turn: turn_state(&tail),

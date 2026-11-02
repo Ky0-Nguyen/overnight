@@ -75,10 +75,9 @@ let snap = {
     stop_enabled: true,
     stop_at: "08:00",
     idle_minutes: 15,
-    wait_for_reset: true,
     battery_floor: 10,
     thermal_guard: true,
-    notify_claude_idle: true,
+    alerts: { limit_hit: { mac: true, phone: false }, stop_time: { mac: true, phone: false }, disk: { mac: true, phone: false } },
     storage_warn_gb: 30,
     cleanup_prompt: "Free up disk space on this Mac. Use the disk-cleanup skill if you have it.",
     phone_alerts: params.get("phone") === "on",
@@ -103,24 +102,21 @@ if (limitMode) {
     message: "You've hit your session limit · resets 2am (Europe/London)",
     sessions: 2,
   };
-  if (limitMode === "waiting") {
-    snap.status = "Waiting for the usage limit to reset";
-    const at = new Date(snap.claude.limit.resets_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-    snap.detail = snap.claude.auto_continue === false
-      ? `Auto-continue is off in Claude Code, so Claude won't continue by itself at ${at}.`
-      : `Claude should continue at ${at}. The Mac stays awake until 10 minutes after.`;
-  }
 }
 
 // &ask=question|approval: the second session is waiting for an answer, the first is done.
 const askMode = params.get("ask");
 if (askMode) {
   snap.claude.needs_you = 1;
-  Object.assign(snap.claude.sessions[1], { turn: askMode, active: false, idle_secs: 260 });
+  Object.assign(snap.claude.sessions[1], { turn: askMode, place: "the Claude app", active: false, idle_secs: 260 });
   Object.assign(snap.claude.sessions[0], { turn: "done", active: false, idle_secs: 90 });
+  // The backend lists sessions that need the user first.
+  snap.claude.sessions.unshift(snap.claude.sessions.splice(1, 1)[0]);
   if (mode === "on") {
-    snap.status = "Awake, Claude needs you";
-    snap.detail = "A session is waiting for you. The Mac sleeps once nothing else is working.";
+    snap.status = "Claude needs you";
+    snap.detail = "Other sessions are still working, so the Mac stays awake until they finish.";
+  } else if (mode === "standby") {
+    snap.detail = "Claude is waiting for you, so closing the lid sleeps the Mac. If Claude starts working while the lid is open, Overnight keeps it awake again.";
   }
 }
 

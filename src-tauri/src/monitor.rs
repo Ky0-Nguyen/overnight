@@ -5,7 +5,7 @@
 use crate::{
     claude::{Ask, ClaudeInfo, LimitState, Turn, Watcher},
     events, helper, phone,
-    settings::{Mode, Settings},
+    settings::{Alert, Mode, Settings},
     storage,
     system::{self, Disk, Power, Thermal},
     tray,
@@ -289,7 +289,7 @@ pub fn tick(app: &AppHandle, shared: &Shared) {
     let helper = helper::status(&ctl);
     let now = Local::now();
 
-    let mut notes: Vec<(String, String)> = Vec::new();
+    let mut notes: Vec<Note> = Vec::new();
     let mut scan = false;
     let snapshot = {
         let mut guard = shared.lock().unwrap();
@@ -329,7 +329,7 @@ pub fn tick(app: &AppHandle, shared: &Shared) {
                 };
                 end_run(core, "helper_lost", msg, pct);
                 core.error = Some(msg.into());
-                notes.push(("Overnight stopped keeping the Mac awake".into(), msg.into()));
+                notes.push((Alert::Helper, "Overnight stopped keeping the Mac awake".into(), msg.into()));
             }
         }
         if !core.want_armed && !core.arming && !helper.running {
@@ -348,19 +348,12 @@ pub fn tick(app: &AppHandle, shared: &Shared) {
 
         let limit_now = claude.limit.as_ref().map(|l| (l.state, l.resets_at));
         if limit_now != core.limit_seen {
-            if let Some((kind, msg, note)) = limit_change(core.limit_seen, &claude, core.want_armed, now) {
+            if let Some((kind, msg, note)) = limit_change(core.limit_seen, &claude, now) {
                 events::append(&log, kind, msg, None);
                 notes.extend(note);
             }
             core.limit_seen = limit_now;
         }
-        // Stay up through a reset so Claude can continue (only if it can reset).
-        // Off when the user has said not to wait (Wait for usage-limit resets).
-        let waiting_for_reset = s.wait_for_reset
-            && claude
-                .limit
-                .as_ref()
-                .is_some_and(|l| l.state == LimitState::Waiting && l.resets_at.is_some());
         // A usage limit or a question has its own notes, so "Claude is idle"
         // would only repeat them.
         let limit_pending = claude.limit.is_some() || claude.needs_you > 0;
@@ -371,25 +364,23 @@ pub fn tick(app: &AppHandle, shared: &Shared) {
             .filter(|a| !core.asks_seen.contains(a))
             .filter(|a| a.since.elapsed().unwrap_or_default() < ASK_NOTE_WITHIN)
             .collect();
-        if let Some((title, body)) = ask_note(&fresh) {
-            events::append(&log, "claude_asks", title.clone(), None);
-            if s.notify_claude_idle {
-                notes.push((title, body));
-            }
+        if let Some(note) = ask_note(&fresh) {
+            events::append(&log, "claude_asks", note.1.clone(), None);
+            notes.push(note);
         }
         core.asks_seen = claude.asks.clone();
 
         let mut released_for_idle = false;
         if core.want_armed {
-            if let Some(reason) = guard_trip(&s, &power, thermal, core.stops_at, now) {
+            if let Some((alert, reason)) = guard_trip(&s, &power, thermal, core.stops_at, now) {
                 end_run(core, "guard", &reason, pct);
-                notes.push(("Overnight let the Mac sleep again".into(), reason.clone()));
+                notes.push((alert, "Overnight let the Mac sleep again".into(), reason.clone()));
                 core.last_guard = Some(reason);
             } else {
                 let grace = core
                     .armed_at
                     .is_some_and(|t| (now - t).to_std().unwrap_or_default() < idle_after);
-                let hold = should_hold(s.mode, claude.active, grace, waiting_for_reset);
+                let hold = should_hold(s.mode, claude.active, grace);
                 // Checked every tick, so the helper follows even if the file goes missing.
                 if hold != core.paths.ctl.join("hold").exists() {
                     if let Err(e) = helper::set_hold(&core.paths.ctl, hold) {
@@ -402,10 +393,11 @@ pub fn tick(app: &AppHandle, shared: &Shared) {
                     } else {
                         events::append(&log, "hold_off", "Released: the Mac can sleep", pct);
                         released_for_idle = true;
-                        if s.notify_claude_idle && !limit_pending {
+                        if !limit_pending {
                             notes.push((
-                                "Claude is idle".into(),
-                                "Claude is done or waiting for you, so the Mac can sleep now.".into(),
+                                Alert::Done,
+                                "Claude is done".into(),
+                                "Nothing is left running, so the Mac can sleep now.".into(),
                             ));
                         }
                     }
@@ -422,10 +414,11 @@ pub fn tick(app: &AppHandle, shared: &Shared) {
         // While a Claude-mode run is waiting out its grace period, the
         // "released" note above covers this.
         let waiting = core.want_armed && s.mode == Mode::Claude;
-        if went_idle && s.notify_claude_idle && !released_for_idle && !waiting && !limit_pending {
+        if went_idle && !released_for_idle && !waiting && !limit_pending {
             notes.push((
-                "Claude is idle".into(),
-                "Claude is done or waiting for you.".into(),
+                Alert::Done,
+                "Claude is done".into(),
+                "Nothing is left running.".into(),
             ));
         }
 
@@ -434,6 +427,7 @@ pub fn tick(app: &AppHandle, shared: &Shared) {
             let free = fmt_gb(disk.free_bytes);
             events::append(&log, "storage_low", format!("Only {free} free"), None);
             notes.push((
+                Alert::Disk,
                 "Disk space is getting low".into(),
                 format!("{free} free. Open Overnight to ask Claude to clean up."),
             ));
@@ -458,6 +452,7 @@ pub fn tick(app: &AppHandle, shared: &Shared) {
                 core.mismatch_noted = true;
                 events::append(&log, "sleep_external", "Sleep was turned back on outside Overnight", pct);
                 notes.push((
+                    Alert::SleepOutside,
                     "Sleep was turned back on outside Overnight".into(),
                     "Overnight is putting the hold back within 30 seconds. Until then, closing the lid sleeps the Mac."
                         .into(),
@@ -480,6 +475,7 @@ pub fn tick(app: &AppHandle, shared: &Shared) {
         if external_off && !core.external_off {
             events::append(&log, "sleep_external", "Sleep was turned off outside Overnight", pct);
             notes.push((
+                Alert::SleepOutside,
                 "Sleep was turned off outside Overnight".into(),
                 "Closing the lid won't sleep the Mac, and Overnight's battery and heat guards aren't watching. \
 To undo it, run sudo pmset -a disablesleep 0 in Terminal."
@@ -517,8 +513,10 @@ To undo it, run sudo pmset -a disablesleep 0 in Terminal."
     if !notes.is_empty() {
         forward_to_phone(shared, &notes, lid);
     }
-    for (title, body) in notes {
-        let _ = app.notification().builder().title(title).body(body).show();
+    for (alert, title, body) in notes {
+        if snapshot.settings.channels(alert).mac {
+            let _ = app.notification().builder().title(title).body(body).show();
+        }
     }
     if scan {
         start_scan(app);
@@ -526,7 +524,8 @@ To undo it, run sudo pmset -a disablesleep 0 in Terminal."
     publish(app, &snapshot);
 }
 
-/// Sends this tick's notifications to the phone as well, when that's on. In
+/// Sends this tick's notifications to the phone as well, each kind the user
+/// wants there, when phone alerts are on. In
 /// the background, so a slow server never holds up the tick; a failure goes
 /// in the log, where the morning summary shows it.
 fn forward_to_phone(shared: &Shared, notes: &[Note], lid: Option<bool>) {
@@ -537,9 +536,12 @@ fn forward_to_phone(shared: &Shared, notes: &[Note], lid: Option<bool>) {
     if !s.phone_alerts || s.ntfy_url.is_empty() || (s.phone_only_when_away && !phone::away(lid)) {
         return;
     }
-    let notes = notes.to_vec();
+    let notes: Vec<Note> = notes.iter().filter(|n| s.channels(n.0).phone).cloned().collect();
+    if notes.is_empty() {
+        return;
+    }
     thread::spawn(move || {
-        for (title, body) in notes {
+        for (_, title, body) in notes {
             if let Err(e) = phone::send(&s.ntfy_url, &title, &body) {
                 events::append(&log, "phone_failed", format!("Phone alert not sent: {e}"), None);
             }
@@ -586,14 +588,17 @@ pub fn start_scan(app: &AppHandle) {
     });
 }
 
-fn should_hold(mode: Mode, claude_active: bool, grace: bool, waiting_for_reset: bool) -> bool {
+/// Claude mode doesn't wait out usage limits: Claude continues by itself
+/// after a reset, and wakes the Mac's activity back up when it does.
+fn should_hold(mode: Mode, claude_active: bool, grace: bool) -> bool {
     match mode {
         Mode::Night => true,
-        Mode::Claude => claude_active || grace || waiting_for_reset,
+        Mode::Claude => claude_active || grace,
     }
 }
 
-type Note = (String, String);
+/// A notification: its kind, which decides where it goes, then title and body.
+type Note = (Alert, String, String);
 
 /// What to say about sessions that just asked something. Like every note it
 /// may go to the phone, so it never names a session or project.
@@ -603,19 +608,22 @@ fn ask_note(fresh: &[&Ask]) -> Option<Note> {
     let same = fresh.iter().all(|a| a.turn == first.turn);
     Some(match (first.turn, same, n) {
         (Turn::Approval, true, 1) => (
+            Alert::Asks,
             "Claude needs your approval".into(),
             "A session is waiting for you to allow a file change. It can't go on until you do.".into(),
         ),
         (Turn::Approval, true, _) => (
+            Alert::Asks,
             "Claude needs your approval".into(),
             format!("{n} sessions are waiting for you to allow a file change."),
         ),
         (_, true, 1) => (
+            Alert::Asks,
             "Claude is asking you something".into(),
             "A session is waiting for your answer. It can't go on until you reply.".into(),
         ),
-        (_, true, _) => ("Claude is asking you something".into(), format!("{n} sessions are waiting for your answer.")),
-        _ => ("Claude needs you".into(), format!("{n} sessions are waiting for your answer or approval.")),
+        (_, true, _) => (Alert::Asks, "Claude is asking you something".into(), format!("{n} sessions are waiting for your answer.")),
+        _ => (Alert::Asks, "Claude needs you".into(), format!("{n} sessions are waiting for your answer or approval.")),
     })
 }
 
@@ -623,7 +631,6 @@ fn ask_note(fresh: &[&Ask]) -> Option<Note> {
 fn limit_change(
     before: Option<(LimitState, Option<DateTime<Local>>)>,
     claude: &ClaudeInfo,
-    armed: bool,
     now: DateTime<Local>,
 ) -> Option<(&'static str, String, Option<Note>)> {
     let hhmm = |t: Option<DateTime<Local>>| t.map_or("an unknown time".into(), system::clock);
@@ -641,17 +648,19 @@ fn limit_change(
     match (before.map(|b| b.0), limit.state, limit.resets_at) {
         (Some(LimitState::Waiting), LimitState::Waiting, _) | (Some(LimitState::Missed), LimitState::Missed, _) => None,
         (_, LimitState::Waiting, _) => {
-            let body = if armed {
-                format!("Claude should continue at {at}. Overnight keeps the Mac awake until then.")
+            let body = if claude.auto_continue == Some(false) {
+                format!("It resets at {at}. Auto-continue is off in Claude Code, so Claude won't continue by itself.")
             } else {
-                format!("Claude can continue at {at} only if the Mac is awake. Turn on Keep awake tonight.")
+                format!("It resets at {at}, and Claude should continue by itself then.")
             };
-            Some(("limit_hit", format!("Claude hit its usage limit, resets at {at}"), Some(("Claude hit its usage limit".into(), body))))
+            let note = (Alert::LimitHit, "Claude hit its usage limit".into(), body);
+            Some(("limit_hit", format!("Claude hit its usage limit, resets at {at}"), Some(note)))
         }
         (_, LimitState::Missed, Some(_)) => Some((
             "limit_missed",
             format!("Claude didn't continue after the {at} reset"),
             Some((
+                Alert::LimitMissed,
                 "Claude didn't continue after the reset".into(),
                 "Open the session and send \"continue\". Overnight shows how to make it continue by itself next time."
                     .into(),
@@ -660,7 +669,7 @@ fn limit_change(
         (_, LimitState::Missed, None) => Some((
             "limit_missed",
             format!("Claude stopped: {}", limit.message),
-            Some(("Claude stopped".into(), limit.message.clone())),
+            Some((Alert::LimitMissed, "Claude stopped".into(), limit.message.clone())),
         )),
     }
 }
@@ -672,21 +681,21 @@ fn guard_trip(
     thermal: Thermal,
     stops_at: Option<DateTime<Local>>,
     now: DateTime<Local>,
-) -> Option<String> {
+) -> Option<(Alert, String)> {
     // Worded to read right both as a notification now and in the morning's
     // summary of how the night ended.
     if let Some(at) = stops_at.filter(|at| now >= *at) {
-        return Some(format!("Reached your {} stop time.", system::clock(at)));
+        return Some((Alert::StopTime, format!("Reached your {} stop time.", system::clock(at))));
     }
     if let Some(pct) = power.percent.filter(|p| !power.on_ac && *p < s.battery_floor) {
-        return Some(format!("The battery dropped to {pct}%, below your {}% floor.", s.battery_floor));
+        return Some((Alert::Guard, format!("The battery dropped to {pct}%, below your {}% floor.", s.battery_floor)));
     }
     if s.thermal_guard && thermal >= Thermal::Serious {
-        return Some(if thermal == Thermal::Critical {
+        return Some((Alert::Guard, if thermal == Thermal::Critical {
             "The Mac was running critically hot.".into()
         } else {
             "The Mac was running hot.".into()
-        });
+        }));
     }
     None
 }
@@ -727,41 +736,28 @@ is open, Overnight keeps it awake again."
         )
     } else {
         let stop = core.stops_at.map(system::clock);
-        // Waiting out a usage limit. Says the same as the popover's limit
-        // callout, including when auto-continue is off.
-        let reset = claude
-            .limit
-            .as_ref()
-            .filter(|l| l.state == LimitState::Waiting)
-            .map(|l| l.resets_at.map_or("the reset".to_string(), |t| format!("at {}", system::clock(t))));
-        match (core.settings.mode, reset) {
-            (Mode::Night, _) => (
+        match core.settings.mode {
+            Mode::Night => (
                 "Awake all night",
                 format!("The lid can close. Stays awake until {}.", stop.as_deref().unwrap_or("you stop it")),
             ),
-            (Mode::Claude, Some(at)) if !claude.active => (
-                "Waiting for the usage limit to reset",
-                if claude.auto_continue == Some(false) {
-                    format!("Auto-continue is off in Claude Code, so Claude won't continue by itself {at}.")
+            // The needs-you note says which; this says why the Mac is still up.
+            Mode::Claude if claude.needs_you > 0 => (
+                "Claude needs you",
+                if claude.active {
+                    "Other sessions are still working, so the Mac stays awake until they finish.".to_string()
                 } else {
-                    format!("Claude should continue {at}. The Mac stays awake until 10 minutes after.")
+                    format!("The Mac sleeps if nothing else starts in the next {idle} min.")
                 },
             ),
-            (Mode::Claude, _) if claude.needs_you > 0 => (
-                "Awake, Claude needs you",
-                format!(
-                    "{} waiting for you. The Mac sleeps once nothing else is working.",
-                    if claude.needs_you == 1 { "A session is" } else { "Sessions are" }
-                ),
-            ),
-            (Mode::Claude, _) if claude.active => (
+            Mode::Claude if claude.active => (
                 "Awake while Claude works",
                 match stop {
-                    Some(t) => format!("The lid can close. Sleeps after {idle} min without activity, or at {t}."),
-                    None => format!("The lid can close. Sleeps after {idle} min without activity."),
+                    Some(t) => format!("The lid can close. Sleeps once Claude is done or idle for {idle} min, or at {t}."),
+                    None => format!("The lid can close. Sleeps once Claude is done or idle for {idle} min."),
                 },
             ),
-            (Mode::Claude, _) => (
+            Mode::Claude => (
                 "Awake, waiting for Claude",
                 format!("Sleeps if nothing happens in the next {idle} min."),
             ),
@@ -819,22 +815,23 @@ mod tests {
         assert!(guard_trip(&s, &battery(false, 50), Thermal::Nominal, None, at(2, 0)).is_none());
         // "Below 10%": 10% itself still holds.
         assert!(guard_trip(&s, &battery(false, 10), Thermal::Nominal, None, at(2, 0)).is_none());
-        assert!(guard_trip(&s, &battery(false, 9), Thermal::Nominal, None, at(2, 0)).unwrap().contains("9%"));
+        assert!(guard_trip(&s, &battery(false, 9), Thermal::Nominal, None, at(2, 0)).unwrap().1.contains("9%"));
         // Plugged in: low charge is fine.
         assert!(guard_trip(&s, &battery(true, 5), Thermal::Nominal, None, at(2, 0)).is_none());
-        assert!(guard_trip(&s, &battery(true, 90), Thermal::Serious, None, at(2, 0)).unwrap().contains("hot"));
+        assert!(guard_trip(&s, &battery(true, 90), Thermal::Serious, None, at(2, 0)).unwrap().1.contains("hot"));
         assert!(guard_trip(&s, &battery(true, 90), Thermal::Fair, None, at(2, 0)).is_none());
-        let stop = guard_trip(&s, &battery(true, 90), Thermal::Nominal, Some(at(8, 0)), at(8, 0)).unwrap();
+        let (alert, stop) = guard_trip(&s, &battery(true, 90), Thermal::Nominal, Some(at(8, 0)), at(8, 0)).unwrap();
+        assert_eq!(alert, Alert::StopTime);
         assert!(stop.contains(&system::clock(at(8, 0))), "{stop}");
     }
 
     #[test]
     fn hold_policy() {
-        assert!(should_hold(Mode::Night, false, false, false));
-        assert!(should_hold(Mode::Claude, true, false, false));
-        assert!(should_hold(Mode::Claude, false, true, false));
-        assert!(should_hold(Mode::Claude, false, false, true)); // waiting out a usage limit
-        assert!(!should_hold(Mode::Claude, false, false, false));
+        assert!(should_hold(Mode::Night, false, false));
+        assert!(should_hold(Mode::Claude, true, false));
+        assert!(should_hold(Mode::Claude, false, true));
+        // Paused on a usage limit counts as not working: no waiting it out.
+        assert!(!should_hold(Mode::Claude, false, false));
     }
 
     #[test]
@@ -842,9 +839,9 @@ mod tests {
         let ask = |turn| Ask { session: PathBuf::from("/s.jsonl"), turn, since: std::time::SystemTime::now() };
         let (q, a) = (ask(Turn::Question), ask(Turn::Approval));
         assert!(ask_note(&[]).is_none());
-        assert_eq!(ask_note(&[&q]).unwrap().0, "Claude is asking you something");
-        assert!(ask_note(&[&a, &a]).unwrap().1.starts_with("2 sessions"));
-        assert_eq!(ask_note(&[&q, &a]).unwrap().0, "Claude needs you");
+        assert_eq!(ask_note(&[&q]).unwrap().1, "Claude is asking you something");
+        assert!(ask_note(&[&a, &a]).unwrap().2.starts_with("2 sessions"));
+        assert_eq!(ask_note(&[&q, &a]).unwrap(), (Alert::Asks, "Claude needs you".into(), "2 sessions are waiting for your answer or approval.".into()));
     }
 
     fn limited(state: LimitState, resets_at: Option<DateTime<Local>>) -> ClaudeInfo {
@@ -857,16 +854,18 @@ mod tests {
     #[test]
     fn limit_changes() {
         let reset = Some(at(2, 0));
-        let hit = limit_change(None, &limited(LimitState::Waiting, reset), true, at(1, 0)).unwrap();
+        let hit = limit_change(None, &limited(LimitState::Waiting, reset), at(1, 0)).unwrap();
         assert_eq!(hit.0, "limit_hit");
-        assert!(hit.2.unwrap().1.contains(&system::clock(at(2, 0))));
+        let note = hit.2.unwrap();
+        assert_eq!(note.0, Alert::LimitHit);
+        assert!(note.2.contains(&system::clock(at(2, 0))));
         // Same state again: nothing new.
-        assert!(limit_change(Some((LimitState::Waiting, reset)), &limited(LimitState::Waiting, reset), true, at(1, 5)).is_none());
-        let missed = limit_change(Some((LimitState::Waiting, reset)), &limited(LimitState::Missed, reset), true, at(2, 15)).unwrap();
+        assert!(limit_change(Some((LimitState::Waiting, reset)), &limited(LimitState::Waiting, reset), at(1, 5)).is_none());
+        let missed = limit_change(Some((LimitState::Waiting, reset)), &limited(LimitState::Missed, reset), at(2, 15)).unwrap();
         assert_eq!(missed.0, "limit_missed");
-        let cleared = limit_change(Some((LimitState::Waiting, reset)), &ClaudeInfo::default(), true, at(2, 3)).unwrap();
+        let cleared = limit_change(Some((LimitState::Waiting, reset)), &ClaudeInfo::default(), at(2, 3)).unwrap();
         assert_eq!(cleared.0, "limit_cleared");
         // A missed limit that aged out isn't reported as continued.
-        assert!(limit_change(Some((LimitState::Missed, reset)), &ClaudeInfo::default(), true, at(5, 0)).is_none());
+        assert!(limit_change(Some((LimitState::Missed, reset)), &ClaudeInfo::default(), at(5, 0)).is_none());
     }
 }

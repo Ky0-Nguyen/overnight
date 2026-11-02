@@ -22,14 +22,14 @@ A good night: Claude's work finishes, including after a usage-limit reset; the M
 
 ## Positioning
 
-Overnight knows what Claude Code is doing. It holds the lid lock while sessions are working or waiting for a usage limit to reset, and releases it when Claude goes idle. Activity comes from session transcripts and the Claude process tree, not from a timer. It does this with one admin password per night and nothing installed system-wide.
+Overnight knows what Claude Code is doing. It holds the lid lock while sessions are working, and releases it when Claude is done, waiting for the user, paused on a usage limit, or idle. Activity comes from session transcripts and the Claude process tree, not from a timer. It does this with one admin password per night and nothing installed system-wide.
 
 ## Operating Context
 
 - Used twice a day: in the evening before closing the lid (arm it, check the guards), and in the morning (read the log, deal with stopped sessions).
 - Lives in the menu bar with no Dock icon. The popover is 380×620 and closes when it loses focus.
 - Reads Claude Code session transcripts in `~/.claude/projects`. The Claude desktop app also appends untimed bookkeeping records to them, so activity is taken from timestamped records, never from the file's modified time.
-- Claude Code usage limits stop sessions until a reset time. Claude can continue by itself after the reset only if the Mac is awake then, and only if auto-continue is on: `autoContinueAtUsageLimit` for Claude Code, or the Claude desktop app's per-card **Auto-continue when limits reset** checkbox.
+- Claude Code usage limits stop sessions until a reset time. Claude continues by itself after the reset only if auto-continue is on: `autoContinueAtUsageLimit` for Claude Code, or the Claude desktop app's per-card **Auto-continue when limits reset** checkbox.
 - Uses macOS notifications for anything the user should know while away from the popover.
 
 ## Capabilities and Constraints
@@ -37,13 +37,14 @@ Overnight knows what Claude Code is doing. It holds the lid lock while sessions 
 Capabilities today:
 - Keep awake with the lid closed, in two modes: **While Claude works** and **All night**. Each has an optional **Stop at** time.
 - Guards: battery floor (sleep below 10% by default), heat, and stop time. The root helper also has its own failsafe at 8% battery.
-- Claude session list with status: *working*, *idle*, *paused* (usage limit, waiting for the reset), *stopped* (didn't continue after a reset), *not running*.
-- Usage limits: stays awake through a reset (Wait for usage-limit resets, on by default), notifies if Claude didn't continue, and shows how to resume and how to turn on auto-continue.
+- Claude session list with status: *working*, *needs you* (a question or a file change to approve), *idle*, *paused* (usage limit, waiting for the reset), *stopped* (didn't continue after a reset), *not running*. A session whose turn ended counts as done straight away.
+- Usage limits: a paused session counts as not working, so the Mac doesn't stay up for a reset; Claude's auto-continue is expected to pick the work up. Overnight notifies if Claude didn't continue, and shows how to resume and how to turn on auto-continue.
+- Notifications: each kind (Claude asks you something, is done, hits a usage limit, doesn't continue after one; stop time, low battery or heat, helper stopped, sleep changed outside Overnight; low disk space) has its own Mac and Phone switch, all on by default.
 - Morning summary: the first open after a run turns the popover's top into "Last night": the run's times, how it ended, Claude's working time, time held awake and the battery change, plus any sessions that need the user.
 - Outside changes: if something else turns sleep back on mid-hold, the helper puts the hold back within 30 seconds and the user is told; if something disables sleep outside a run, the user is told the guards aren't watching.
 - Storage: free-space warning, a scan of common space hogs, and **Ask Claude to clean up**, which opens Claude Code in Terminal.
 - Log: a timeline of each night with a summary of time held awake, time Claude was busy, and the battery change.
-- Phone alerts through ntfy: the same notifications as on the Mac, sent only while the user is away by default (lid closed, or no input for 5 minutes). They never name a session or project. Claude's own phone push needs Remote Control, which organizations can turn off (the author's has), so Overnight doesn't rely on it.
+- Phone alerts through ntfy: the notifications the user picks for the phone, sent only while the user is away by default (lid closed, or no input for 5 minutes). They never name a session or project. Claude's own phone push needs Remote Control, which organizations can turn off (the author's has), so Overnight doesn't rely on it.
 
 Binding constraints (confirmed):
 - **No permanent root.** Never install sudoers rules, launch daemons or anything system-wide. A root helper is started through the macOS admin prompt at most once per night and exits when released or when the app quits.
@@ -54,6 +55,7 @@ Binding constraints (confirmed):
 
 Terminology (use consistently):
 - *working* / *idle* for Claude's activity. *Idle* means no activity for the idle time (15 minutes by default).
+- *needs you* for a session waiting on the user: a question or a file change to approve, or a session stopped after a usage limit. Session rows say which (*asking you*, *needs approval*, *stopped*) and where to answer.
 - *paused* / *stopped* for usage limits.
 - *continue*, matching Claude's own **Auto-continue**.
 - **Keep awake tonight** / **Let it sleep** for the main action.

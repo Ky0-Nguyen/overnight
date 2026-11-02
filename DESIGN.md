@@ -435,8 +435,14 @@ White cards with a hairline and 10px radius holding rows separated by hairlines.
 ### Switches and inputs
 Switches are 32 by 19 with a white knob, the control track off and green on, 0.2s transitions. Inputs sit on the control fill with no border, 6px radius. Checkboxes use the system control tinted with the accent.
 
+### Notifications table
+One table per kind of alert inside a group card: a visually hidden first column header, then Mac and Phone column headers in 11px muted that stay pinned while the rows scroll. Group rows (Claude, The Mac, Storage) are 11px semibold muted row-group headers; each alert row reads on from its group ("Claude · Needs you") with an optional 11px sublabel, separated by hairlines. Each checkbox sits in a label that fills its cell at 34px. The Phone column hides until phone alerts are on, with a hint in its place; the phone switch and setup follow the table in the same card.
+
+### Time menus
+Times are native pop-up menus, never `<input type="time">`, which WebKit draws as bare digits. Stop at lists half hours from noon, in the user's 12 or 24-hour format, and keeps an off-grid saved time.
+
 ### Pills and status
-Session status pills (working, idle, paused, stopped) are 11px semibold with 0.02em tracking on a 15 to 18% tint of their status fill, text in the status text colour. Session dots are 7px, green with a halo when working.
+Session status pills (working, needs you, idle, paused, stopped) are 11px semibold with 0.02em tracking on a 15 to 18% tint of their status fill, text in the status text colour. Session dots are 7px, green with a halo when working.
 
 ### Usage-limit callout
 An orange-tinted card (12% into the card, 35% border) for paused sessions; red (10%, 35%) for stopped ones. Title in 600 weight; secondary text mixed toward the tone; a disclosure (Make it continue by itself next time) in the tone colour with steps and a copyable prompt.

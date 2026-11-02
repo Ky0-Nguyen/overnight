@@ -113,11 +113,11 @@ function renderHero(s) {
 
 // What, if anything, needs the user: only what Overnight actually knows.
 function needsYou(s) {
-  const asks = s.claude.needs_you;
-  if (asks) return asks === 1 ? "A session is waiting for you" : `${asks} sessions are waiting for you`;
   const limit = s.claude.limit;
+  // Asking and stopped sessions both wait on the user, so they count together.
+  const n = s.claude.needs_you + (limit?.state === "missed" ? limit.sessions : 0);
+  if (n) return n === 1 ? "A session needs you" : `${n} sessions need you`;
   if (!limit) return null;
-  if (limit.state === "missed") return limit.sessions === 1 ? "A session needs you" : `${limit.sessions} sessions need you`;
   if (s.claude.auto_continue === false && limit.resets_at) return "Auto-continue is off";
   return null;
 }
@@ -144,17 +144,14 @@ function renderSettings() {
   }
   const claude = s.mode === "claude";
   $("mode-hint").textContent = claude
-    ? s.wait_for_reset
-      ? `Stays awake while Claude works or waits for a usage limit to reset. Sleeps once Claude is done, waiting for you, or idle for ${s.idle_minutes} min.`
-      : `Stays awake while Claude works. Sleeps once Claude is done, waiting for you, or idle for ${s.idle_minutes} min, even with a usage limit about to reset.`
+    ? `Stays awake while Claude works. Sleeps once Claude is done, waiting for you, paused on a usage limit, or idle for ${s.idle_minutes} min.`
     : "Stays awake until the stop time, a low battery or heat, whichever comes first.";
-  $("wait-reset-row").hidden = !claude;
-  $("wait-reset").checked = s.wait_for_reset;
   setValue("idle", s.idle_minutes);
   $("stop-enabled").checked = s.stop_enabled;
+  stopTimes(s.stop_at);
   setValue("stop-at", s.stop_at);
   $("stop-at").disabled = !s.stop_enabled;
-  $("notify-idle").checked = s.notify_claude_idle;
+  renderAlerts(s);
   $("phone").checked = s.phone_alerts;
   $("phone-setup").hidden = !s.phone_alerts;
   setValue("ntfy-url", s.ntfy_url);
@@ -165,9 +162,95 @@ function renderSettings() {
   setValue("cleanup-prompt", s.cleanup_prompt);
 }
 
+// Stop at is a menu of half hours. WebKit's time field draws only its digits,
+// with no clock to pick from. A stop time set some other way joins the list.
+function stopTimes(current) {
+  const menu = $("stop-at");
+  const wanted = new Set([current]);
+  for (let m = 0; m < 24 * 60; m += 30) wanted.add(`${pad(Math.floor(m / 60))}:${pad(m % 60)}`);
+  // From noon, so a night's choices (10 PM … 8 AM) read in one run.
+  const fromNoon = (v) => (Number(v.slice(0, 2)) * 60 + Number(v.slice(3)) + 720) % 1440;
+  const values = [...wanted].filter(Boolean).sort((a, b) => fromNoon(a) - fromNoon(b));
+  if (values.join() === [...menu.options].map((o) => o.value).join()) return;
+  menu.replaceChildren(
+    ...values.map((v) => {
+      const [h, m] = v.split(":").map(Number);
+      const label = new Date(2000, 0, 1, h, m).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+      return new Option(label, v);
+    }),
+  );
+}
+const pad = (n) => String(n).padStart(2, "0");
+
+// Every notification, by kind, with where it can go. Kinds match `Alert` in
+// settings.rs; each row reads on from its group: "Claude needs you".
+const ALERTS = [
+  ["Claude", [
+    ["asks", "Needs you", "A question, or a file change to approve"],
+    ["done", "Finishes", "Nothing is left running"],
+    ["limit_hit", "Pauses on a usage limit", "Until the limit resets"],
+    ["limit_missed", "Doesn't continue after a limit", "Open the session and send “continue”"],
+  ]],
+  ["The Mac", [
+    ["stop_time", "Stop time reached"],
+    ["guard", "Low battery or too hot"],
+    ["helper", "Overnight stops early", "Normal sleep is back before morning"],
+    ["sleep_outside", "Another app changes sleep", "Closing the lid may not do what you expect"],
+  ]],
+  ["Storage", [["disk", "Low on disk space"]]],
+];
+
+function buildAlerts() {
+  const table = $("alerts");
+  for (const [group, kinds] of ALERTS) {
+    const body = document.createElement("tbody");
+    const head = el("tr", "alerts-group");
+    const th = el("th", null, group);
+    th.colSpan = 3;
+    th.scope = "rowgroup";
+    head.append(th);
+    body.append(head);
+    for (const [kind, label, sub] of kinds) {
+      const tr = el("tr");
+      const name = el("th", "label", label);
+      name.scope = "row";
+      if (sub) name.append(el("span", "sub", sub));
+      tr.append(name);
+      for (const channel of ["mac", "phone"]) {
+        const box = document.createElement("input");
+        box.type = "checkbox";
+        box.dataset.kind = kind;
+        box.dataset.channel = channel;
+        box.setAttribute("aria-label", `${group}: ${label}, ${channel === "mac" ? "on the Mac" : "on the phone"}`);
+        box.addEventListener("change", () => {
+          const alerts = { ...settings.alerts, [kind]: { ...settings.alerts[kind], [channel]: box.checked } };
+          update({ alerts });
+        });
+        // The whole cell is the target, not just the 13px box.
+        const hit = el("label", "alert-hit");
+        hit.append(box);
+        const td = el("td", channel === "phone" ? "phone-col" : null);
+        td.append(hit);
+        tr.append(td);
+      }
+      body.append(tr);
+    }
+    table.append(body);
+  }
+}
+
+function renderAlerts(s) {
+  for (const box of $("alerts").querySelectorAll("input")) {
+    box.checked = s.alerts?.[box.dataset.kind]?.[box.dataset.channel] ?? true;
+  }
+  $("alerts").classList.toggle("no-phone", !s.phone_alerts);
+  $("alerts-hint").hidden = s.phone_alerts;
+}
+
 // One word for what Claude is doing overall. "Idle" means no activity for
 // the idle time; a usage limit says paused (waiting for the reset) or stopped.
-// A question or an approval outranks the rest: that session can't go on until it's answered.
+// Stopped outranks the rest, then a question or an approval: neither session
+// can go on until the user steps in.
 const CLAUDE_PILL = {
   "needs you": "pill warn",
   working: "pill on",
@@ -178,9 +261,10 @@ const CLAUDE_PILL = {
 };
 
 function claudeState(c) {
+  if (c.limit?.state === "missed") return "stopped";
   if (c.needs_you) return "needs you";
   if (c.active) return "working";
-  if (c.limit) return c.limit.state === "waiting" ? "paused" : "stopped";
+  if (c.limit) return "paused";
   return c.processes ? "idle" : "not running";
 }
 
@@ -196,9 +280,11 @@ function renderClaude(c) {
   for (const x of c.sessions) {
     const li = el("li");
     const text = el("div");
-    text.append(el("div", "s-title", x.title), el("span", "s-project", x.project));
-    const stopped = x.limit === "missed";
     const asking = x.turn === "question" || x.turn === "approval";
+    // Where to answer, in words, not only in the tooltip.
+    const where = x.place ? `${x.turn === "question" ? "Answer" : "Approve"} it in ${x.place}` : "Open the session to answer";
+    text.append(el("div", "s-title", x.title), el("span", "s-project", asking ? `${where} · ${x.project}` : x.project));
+    const stopped = x.limit === "missed";
     const right = x.limit
       ? el("span", stopped ? "s-limit missed" : "s-limit", stopped ? "stopped" : "paused")
       : asking
@@ -255,18 +341,17 @@ function renderLimit(s) {
   if (waiting) {
     const when = at ? `at ${at}` : "after the reset";
     title = at ? `Paused on the usage limit until ${at}` : "Paused on the usage limit";
-    const late = s.armed && s.stops_at && limit.resets_at && new Date(limit.resets_at) > new Date(s.stops_at);
     const lead = `${who} hit Claude's usage limit.`;
+    const night = s.armed && s.settings.mode === "night";
+    const late = night && s.stops_at && limit.resets_at && new Date(limit.resets_at) > new Date(s.stops_at);
     if (autoOff) {
       text = `${lead} Auto-continue is off in Claude Code, so Claude won't continue by itself ${when}.`;
-    } else if (!s.armed) {
-      text = `${lead} Claude can continue ${when} only if the Mac is awake, so turn on Keep awake tonight.`;
-    } else if (s.settings.mode === "claude" && !s.settings.wait_for_reset) {
-      text = `${lead} Wait for usage-limit resets is off, so the Mac sleeps once Claude is idle and Claude can't continue ${when}.`;
     } else if (late) {
-      text = `${lead} Your ${clock(s.stops_at)} stop time comes first, so the Mac will sleep before Claude can continue. Turn off Stop at, or set it later.`;
+      text = `${lead} Your ${clock(s.stops_at)} stop time comes first, so the Mac sleeps before the limit resets. Claude continues once the Mac is awake again.`;
+    } else if (night) {
+      text = `${lead} The Mac stays awake all night, so Claude should continue by itself ${when}. If it doesn't, you'll get a notification.`;
     } else {
-      text = `${lead} Claude should continue ${when}, and Overnight keeps the Mac awake until then. If it doesn't, you'll get a notification.`;
+      text = `${lead} A paused session isn't working, so the Mac can sleep. Claude should continue by itself once the limit has reset and the Mac is awake.`;
     }
   } else if (at) {
     title = `Claude didn't continue after the ${at} reset`;
@@ -548,7 +633,7 @@ function bind() {
     showTab("tonight");
     const target = state?.claude.needs_you ? $("sessions") : $("limit");
     target.scrollIntoView({ block: "start", behavior: reducedMotion.matches ? "auto" : "smooth" });
-    if (target.id === "limit") target.focus({ preventScroll: true });
+    target.focus({ preventScroll: true });
   });
   $("morning-hide").addEventListener("click", () => {
     try {
@@ -556,7 +641,6 @@ function bind() {
     } catch {}
     if (state) render(state);
   });
-  $("wait-reset").addEventListener("change", (e) => update({ wait_for_reset: e.target.checked }));
   for (const b of document.querySelectorAll(".seg button")) {
     b.addEventListener("click", () => update({ mode: b.dataset.mode }));
   }
@@ -568,7 +652,6 @@ function bind() {
   num("warn-gb", "storage_warn_gb", 1, 4000);
   $("stop-enabled").addEventListener("change", (e) => update({ stop_enabled: e.target.checked }));
   $("stop-at").addEventListener("change", (e) => e.target.value && update({ stop_at: e.target.value }));
-  $("notify-idle").addEventListener("change", (e) => update({ notify_claude_idle: e.target.checked }));
   $("thermal-guard").addEventListener("change", (e) => update({ thermal_guard: e.target.checked }));
   $("cleanup-prompt").addEventListener("change", (e) => update({ cleanup_prompt: e.target.value }));
 
@@ -626,6 +709,7 @@ async function boot() {
   } else {
     ({ invoke, listen } = await import("./preview-mock.js"));
   }
+  buildAlerts();
   bind();
   try {
     tab = localStorage.getItem("tab") || tab;
