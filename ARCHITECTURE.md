@@ -45,7 +45,7 @@ Overnight doesn't keep the Mac awake through a reset. In While Claude works mode
 
 ## Notifications
 
-Overnight notifies you when Claude asks you something, is done, hits a usage limit or doesn't continue after one; when it stops keeping the Mac awake (the stop time, low battery or heat, or the helper stopping); when something else changes the sleep setting; and when disk space runs low. Under Notifications, at the bottom of the popover, each kind has a Mac switch and, once phone alerts are on, a Phone switch. All of them start on. Settings from before this list keep their old Notify me when Claude needs me choice for the "is done" alert.
+Overnight notifies you when Claude asks you something, is done, hits a usage limit or doesn't continue after one; when it stops keeping the Mac awake (the stop time, low battery or heat, or the helper stopping); when something else changes the sleep setting; and when disk space runs low. Under Notifications, at the bottom of the popover, each kind has a Mac switch and, once phone alerts are on, a Phone switch. All of them start on. Settings from before this list keep their old Notify me when Claude needs me choice for the "is done" alert. That alert only follows work that lasted 5 minutes or more, so a quick reply or a scheduled check that runs for a minute doesn't send one.
 
 ## Phone alerts
 

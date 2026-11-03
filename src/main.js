@@ -187,7 +187,7 @@ const pad = (n) => String(n).padStart(2, "0");
 const ALERTS = [
   ["Claude", [
     ["asks", "Needs you", "A question, or a file change to approve"],
-    ["done", "Finishes", "Nothing is left running"],
+    ["done", "Finishes", "After working for 5 min or more"],
     ["limit_hit", "Pauses on a usage limit", "Until the limit resets"],
     ["limit_missed", "Doesn't continue after a limit", "Open the session and send “continue”"],
   ]],

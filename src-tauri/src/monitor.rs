@@ -41,6 +41,10 @@ Press Let it sleep, then Keep awake tonight again.";
 /// Questions older than this when Overnight first sees them (say, from
 /// before it started) are shown in the popover but not announced.
 const ASK_NOTE_WITHIN: Duration = Duration::from_secs(30 * 60);
+/// Claude has to have worked this long for "Claude is done" to be worth a
+/// note. Quick replies you're watching, and scheduled checks that run for a
+/// minute every hour, end without one.
+const DONE_AFTER_WORK: Duration = Duration::from_secs(5 * 60);
 
 pub type Shared = Arc<Mutex<Core>>;
 
@@ -107,6 +111,11 @@ pub struct Core {
     stops_at: Option<DateTime<Local>>,
     holding: bool,
     claude_active: bool,
+    /// When Claude last started working.
+    working_since: Option<Instant>,
+    /// How long the spell of work that just ended lasted, until its "done"
+    /// note goes out or is skipped.
+    worked: Option<Duration>,
     /// The usage-limit state seen last tick, to log and notify on changes.
     limit_seen: Option<(LimitState, Option<DateTime<Local>>)>,
     /// Questions and approvals seen last tick, so each is announced once.
@@ -153,6 +162,8 @@ impl Core {
             stops_at: None,
             holding: false,
             claude_active: false,
+            working_since: None,
+            worked: None,
             limit_seen: None,
             asks_seen: Vec::new(),
             prev_lid: None,
@@ -344,6 +355,13 @@ pub fn tick(app: &AppHandle, shared: &Shared) {
             }
         }
         let went_idle = core.claude_active && !claude.active;
+        if claude.active && !core.claude_active {
+            core.working_since = Some(Instant::now());
+            core.worked = None;
+        }
+        if went_idle {
+            core.worked = core.working_since.map(|t| t.elapsed());
+        }
         core.claude_active = claude.active;
 
         let limit_now = claude.limit.as_ref().map(|l| (l.state, l.resets_at));
@@ -393,7 +411,7 @@ pub fn tick(app: &AppHandle, shared: &Shared) {
                     } else {
                         events::append(&log, "hold_off", "Released: the Mac can sleep", pct);
                         released_for_idle = true;
-                        if !limit_pending {
+                        if !limit_pending && worked_long(core.worked.take()) {
                             notes.push((
                                 Alert::Done,
                                 "Claude is done".into(),
@@ -414,7 +432,7 @@ pub fn tick(app: &AppHandle, shared: &Shared) {
         // While a Claude-mode run is waiting out its grace period, the
         // "released" note above covers this.
         let waiting = core.want_armed && s.mode == Mode::Claude;
-        if went_idle && !released_for_idle && !waiting && !limit_pending {
+        if went_idle && !released_for_idle && !waiting && !limit_pending && worked_long(core.worked.take()) {
             notes.push((
                 Alert::Done,
                 "Claude is done".into(),
@@ -590,6 +608,11 @@ pub fn start_scan(app: &AppHandle) {
 
 /// Claude mode doesn't wait out usage limits: Claude continues by itself
 /// after a reset, and wakes the Mac's activity back up when it does.
+/// Whether a spell of work that ended was long enough to announce.
+fn worked_long(worked: Option<Duration>) -> bool {
+    worked.is_some_and(|w| w >= DONE_AFTER_WORK)
+}
+
 fn should_hold(mode: Mode, claude_active: bool, grace: bool) -> bool {
     match mode {
         Mode::Night => true,
@@ -823,6 +846,13 @@ mod tests {
         let (alert, stop) = guard_trip(&s, &battery(true, 90), Thermal::Nominal, Some(at(8, 0)), at(8, 0)).unwrap();
         assert_eq!(alert, Alert::StopTime);
         assert!(stop.contains(&system::clock(at(8, 0))), "{stop}");
+    }
+
+    #[test]
+    fn done_needs_real_work() {
+        assert!(!worked_long(None));
+        assert!(!worked_long(Some(Duration::from_secs(70)))); // an hourly check
+        assert!(worked_long(Some(DONE_AFTER_WORK)));
     }
 
     #[test]
