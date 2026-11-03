@@ -63,11 +63,11 @@ Terminology (use consistently):
 
 Open decisions:
 - Distribution: releases are built and published automatically on every push to main that changes the app (GitHub Releases, universal, ad-hoc signed, not notarized; users approve the first open in Privacy & Security). Still open: an Apple Developer ID for signing and notarization, an in-app update check, and the minimum macOS version (currently 12).
-- Wording now that Codex and Cursor count: the mode, the pill, the status lines and the log still say Claude.
 - A license for the public repository (none chosen yet).
 - First-run onboarding for people who aren't the author.
 - Phone alerts: whether to support private ntfy servers that need an access token (it would belong in the Keychain), and whether to offer other services such as Pushover.
 - An accessibility standard. The popover now meets WCAG AA contrast in both themes, has a visible focus ring, announces status changes and links its tabs to their panels; nothing formal has been decided beyond that.
+- Wording now that Codex and Cursor count: the mode, the pill, the status lines and the log still say Claude.
 
 ## Brand Commitments
 
