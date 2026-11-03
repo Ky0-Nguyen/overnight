@@ -56,15 +56,37 @@ jobs:
           cargo test --manifest-path src-tauri/Cargo.toml
           sh scripts/test-helper.sh
 
+      # The key signs Overnight.app.tar.gz, which the app's updater checks
+      # against the public key in tauri.conf.json before installing it.
       - name: Build the universal app
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri -- build --target universal-apple-darwin --bundles app
 
       - name: Package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          app=src-tauri/target/universal-apple-darwin/release/bundle/macos/Overnight.app
+          bundle=src-tauri/target/universal-apple-darwin/release/bundle/macos
+          app="$bundle/Overnight.app"
           codesign --verify --deep --strict "$app"
           lipo -archs "$app/Contents/MacOS/overnight"
           ditto -c -k --keepParent "$app" Overnight-macos.zip
+          # What the app's updater reads from releases/latest. The app is
+          # universal, so both Mac architectures get the same archive.
+          cp "$bundle/Overnight.app.tar.gz" .
+          url="https://github.com/${{ github.repository }}/releases/download/v$VERSION/Overnight.app.tar.gz"
+          jq -n \
+            --arg version "$VERSION" \
+            --arg notes "https://github.com/${{ github.repository }}/releases/tag/v$VERSION" \
+            --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg url "$url" \
+            --arg sig "$(cat "$bundle/Overnight.app.tar.gz.sig")" \
+            '{version: $version, notes: $notes, pub_date: $date, platforms: {
+              "darwin-aarch64": {url: $url, signature: $sig},
+              "darwin-x86_64": {url: $url, signature: $sig}}}' > latest.json
+          cat latest.json
 
       - name: Commit the version and tag it
         env:
@@ -99,4 +121,4 @@ jobs:
               echo "- First release."
             fi
           } > notes.md
-          gh release create "v$VERSION" Overnight-macos.zip --title "Overnight $VERSION" --notes-file notes.md --latest
+          gh release create "v$VERSION" Overnight-macos.zip Overnight.app.tar.gz latest.json --title "Overnight $VERSION" --notes-file notes.md --latest

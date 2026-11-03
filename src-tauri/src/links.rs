@@ -16,6 +16,13 @@ pub fn repo() {
     open(REPO.to_string());
 }
 
+/// A release's page on GitHub, for what changed in it.
+pub fn release(version: &str) {
+    if version.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-') {
+        open(format!("{REPO}/releases/tag/v{version}"));
+    }
+}
+
 /// A new GitHub issue with the app and macOS versions filled in and nothing
 /// else: no session titles, projects or logs leave the Mac this way.
 pub fn report_problem(app_version: &str) {

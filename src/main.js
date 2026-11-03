@@ -75,6 +75,9 @@ function render(s) {
   $("help").title = `Overnight ${s.version} documentation`;
 
   renderSettings();
+  renderUpdate(s);
+  $("login").checked = s.open_at_login;
+  setText($("check-updates-sub"), `Version ${s.version}. Looks for new versions on GitHub and asks before installing.`);
   renderClaude(s.claude);
   renderLimit(s);
   renderGuards(s);
@@ -160,6 +163,24 @@ function renderSettings() {
   $("thermal-guard").checked = s.thermal_guard;
   setValue("warn-gb", s.storage_warn_gb);
   setValue("cleanup-prompt", s.cleanup_prompt);
+  $("check-updates").checked = s.check_updates;
+}
+
+// A newer version on GitHub. It installs only from here, and not while the
+// Mac is being kept awake: the restart would end the night.
+function renderUpdate(s) {
+  const u = s.update;
+  $("update").hidden = !u;
+  if (!u) return;
+  const busy = s.armed || armPending;
+  setText($("update-title"), `Overnight ${u.version} is available`);
+  const detail = u.installing
+    ? "Downloading. Overnight restarts when it's done."
+    : u.error || (busy ? "You can update once it stops keeping the Mac awake." : `You have ${s.version}.`);
+  setText($("update-detail"), detail);
+  $("update-detail").className = u.error && !u.installing ? "sub bad" : "sub";
+  setText($("update-install"), u.installing ? "Updating…" : "Update");
+  $("update-install").disabled = u.installing || busy;
 }
 
 // Stop at is a menu of half hours. WebKit's time field draws only its digits,
@@ -523,6 +544,8 @@ const KIND_DOT = {
   storage_low: "orange",
   phone_failed: "orange",
   helper_lost: "red",
+  update_available: "accent",
+  updated: "green",
 };
 
 function renderEvents(events) {
@@ -693,6 +716,23 @@ function bind() {
       hint.textContent = "Opened Claude Code in Terminal.";
     } catch (e) {
       hint.textContent = String(e);
+    }
+  });
+  $("update-install").addEventListener("click", async () => {
+    try {
+      await invoke("install_update");
+    } catch {
+      // The reason comes back as state.update.error.
+    }
+  });
+  $("update-notes").addEventListener("click", () => invoke("open_release"));
+  $("check-updates").addEventListener("change", (e) => update({ check_updates: e.target.checked }));
+  // macOS holds this one, not the settings file.
+  $("login").addEventListener("change", async (e) => {
+    try {
+      await invoke("set_open_at_login", { enabled: e.target.checked });
+    } catch {
+      e.target.checked = !e.target.checked;
     }
   });
   $("reveal-log").addEventListener("click", () => invoke("reveal_log"));

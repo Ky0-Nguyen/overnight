@@ -44,6 +44,13 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNGN0YxQjdFNTM3NkY4NDUKUldSRitIWlRmaHQvUHluNk1uMEhudTRFSmducnluZTdFdG45WWt4Z0RZejl2bGVhTXFCUkphMXYK",
+      "endpoints": ["https://github.com/dienp/overnight/releases/latest/download/latest.json"]
+    }
   }
 }

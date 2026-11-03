@@ -90,6 +90,8 @@ pub struct Settings {
     /// Has Keep awake tonight ever worked? Until it has, the popover explains
     /// the password prompt before it appears.
     pub armed_before: bool,
+    /// Look for new versions on GitHub now and then, and say when there is one.
+    pub check_updates: bool,
 }
 
 impl Default for Settings {
@@ -109,6 +111,7 @@ impl Default for Settings {
             ntfy_url: String::new(),
             phone_only_when_away: true,
             armed_before: false,
+            check_updates: true,
         }
     }
 }
@@ -197,5 +200,6 @@ mod tests {
         let s: Settings = serde_json::from_str(r#"{"mode":"night"}"#).unwrap();
         assert_eq!(s.mode, Mode::Night);
         assert_eq!(s.idle_minutes, 15);
+        assert!(s.check_updates);
     }
 }

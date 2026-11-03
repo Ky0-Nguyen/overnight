@@ -4,11 +4,11 @@
 
 use crate::{
     claude::{Ask, ClaudeInfo, LimitState, Turn, Watcher},
-    events, helper, phone,
+    events, helper, login, phone,
     settings::{Alert, Mode, Settings},
     storage,
     system::{self, Disk, Power, Thermal},
-    tray,
+    tray, updates,
 };
 use chrono::{DateTime, Local, TimeDelta};
 use serde::Serialize;
@@ -91,6 +91,9 @@ pub struct Snapshot {
     pub settings: Settings,
     pub last_guard: Option<String>,
     pub error: Option<String>,
+    /// A newer version on GitHub, until it's installed.
+    pub update: Option<updates::UpdateView>,
+    pub open_at_login: bool,
 }
 
 pub struct Core {
@@ -179,6 +182,11 @@ impl Core {
 
     pub fn armed(&self) -> bool {
         self.want_armed
+    }
+
+    /// Keeping the Mac awake, or about to: no time to restart for an update.
+    pub fn busy(&self) -> bool {
+        self.want_armed || self.arming
     }
 }
 
@@ -524,6 +532,8 @@ To undo it, run sudo pmset -a disablesleep 0 in Terminal."
             version: env!("CARGO_PKG_VERSION"),
             last_guard: core.last_guard.clone(),
             error: core.error.clone(),
+            update: updates::view(app),
+            open_at_login: login::enabled(app),
         };
         core.snapshot.clone()
     };

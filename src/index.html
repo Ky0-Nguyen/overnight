@@ -35,6 +35,15 @@
         <button class="link error-help" id="error-help" data-docs="lid-lock" hidden>How the lid lock works</button>
       </header>
 
+      <div class="update" id="update" role="status" hidden>
+        <p class="update-text">
+          <strong id="update-title"></strong>
+          <span class="sub" id="update-detail"></span>
+        </p>
+        <button class="link" id="update-notes">What's new</button>
+        <button class="btn secondary small" id="update-install">Update</button>
+      </div>
+
       <nav class="tabs" role="tablist" aria-label="Sections">
         <button role="tab" id="tab-btn-tonight" aria-controls="tab-tonight" data-tab="tonight" aria-selected="true">Tonight</button>
         <button role="tab" id="tab-btn-storage" aria-controls="tab-storage" data-tab="storage" aria-selected="false">
@@ -151,6 +160,21 @@
                 </div>
               </div>
             </div>
+          </div>
+
+          <h2>Overnight</h2>
+          <div class="group rows">
+            <label class="row">
+              <span>Open at login</span>
+              <input type="checkbox" class="switch" id="login" />
+            </label>
+            <label class="row">
+              <span class="label">
+                Check for updates
+                <span class="sub" id="check-updates-sub">Looks for new versions on GitHub and asks before installing.</span>
+              </span>
+              <input type="checkbox" class="switch" id="check-updates" />
+            </label>
           </div>
         </section>
 

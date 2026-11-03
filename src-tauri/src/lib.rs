@@ -2,12 +2,14 @@ mod claude;
 mod events;
 mod helper;
 mod links;
+mod login;
 mod monitor;
 mod phone;
 mod settings;
 mod storage;
 mod system;
 mod tray;
+mod updates;
 
 use chrono::{Local, TimeDelta};
 use monitor::{Kicker, Paths, Shared, Snapshot};
@@ -130,6 +132,27 @@ fn popover_ready(kick: State<Kicker>) {
     kick.kick();
 }
 
+/// The popover's Update button. On success the app restarts into the new
+/// version, so this only ever returns an error.
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<(), String> {
+    updates::install(app).await
+}
+
+#[tauri::command]
+fn open_release(app: AppHandle) {
+    if let Some(version) = updates::found_version(&app) {
+        links::release(&version);
+    }
+}
+
+#[tauri::command]
+fn set_open_at_login(enabled: bool, app: AppHandle, kick: State<Kicker>) -> Result<(), String> {
+    let result = login::set(&app, enabled);
+    kick.kick();
+    result
+}
+
 /// Escape in the popover.
 #[tauri::command]
 fn hide_popover(app: AppHandle) {
@@ -147,6 +170,8 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_positioner::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -155,6 +180,7 @@ pub fn run() {
             let data = app.path().app_data_dir()?;
             fs::create_dir_all(&data)?;
             let welcomed = data.join(".welcomed");
+            login::default_on(app.handle(), &home, &data);
             let paths = Paths {
                 ctl: data.join("ctl"),
                 log: data.join("events.jsonl"),
@@ -166,8 +192,10 @@ pub fn run() {
             let (tx, rx) = mpsc::channel();
             app.manage(shared.clone());
             app.manage(Kicker(Mutex::new(tx)));
+            app.manage(updates::Updates::default());
             tray::build(app.handle())?;
             monitor::spawn(app.handle().clone(), shared, rx);
+            updates::spawn(app.handle().clone());
             // First launch: open the popover so it's clear where the app lives.
             if !welcomed.exists() {
                 let _ = fs::write(&welcomed, b"");
@@ -195,7 +223,10 @@ pub fn run() {
             new_ntfy_topic,
             test_phone_alert,
             open_docs,
-            report_problem
+            report_problem,
+            install_update,
+            open_release,
+            set_open_at_login
         ])
         .build(tauri::generate_context!())
         .expect("error while building Overnight");

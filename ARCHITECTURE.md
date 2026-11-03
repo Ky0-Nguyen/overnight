@@ -55,6 +55,12 @@ Alerts never name a session or project. Anyone who knows an ntfy.sh topic name c
 
 Claude's own phone notifications go through Remote Control, which some organizations turn off. These alerts don't depend on it.
 
+## Updates and opening at login
+
+Every 6 hours, and a minute after it starts, Overnight reads `latest.json` from the newest GitHub release. When that names a newer version, it sends one notification and shows an Update bar in the popover. Nothing installs until you click Update. The archive it downloads, `Overnight.app.tar.gz`, is signed in the release workflow, and the app checks it against the public key in `tauri.conf.json` before it replaces itself and restarts. Update is turned off while Overnight is keeping the Mac awake, because restarting would end the night. Check for updates, under Overnight in the popover, turns the background checks off. Check for Updates in the menu bar menu checks at once either way.
+
+Open at login is a LaunchAgent, `~/Library/LaunchAgents/Overnight.plist`, that starts the app's own executable. Overnight turns it on the first time it runs from an Applications folder, and never again after that, so switching it off in the popover sticks. A copy run from Downloads leaves it off.
+
 ## Files
 
 Overnight keeps everything in `~/Library/Application Support/dev.local.overnight/`:
@@ -65,6 +71,8 @@ Overnight keeps everything in `~/Library/Application Support/dev.local.overnight
 | `events.jsonl` | The log, trimmed to about 2 MB |
 | `ctl/` | The helper's `hold`, `release` and `pid` files |
 | `cleanup.command` | The Terminal script that Ask Claude to clean up runs |
+| `update-announced` | The last new version a notification went out for |
+| `.login-default` | Marks that Open at login was turned on the first time |
 
 ## Resource use
 

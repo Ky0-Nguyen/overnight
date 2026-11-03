@@ -28,13 +28,15 @@ sh scripts/test-helper.sh           # the root helper, with pmset and ioreg stub
 src-tauri/target/debug/overnight --probe   # print live readings as JSON
 ```
 
-To work on the popover without Tauri, serve `src/` (for example with `python3 -m http.server -d src`) and open `index.html`. It loads `preview-mock.js` in place of the backend. Query parameters choose the state: `state=off`, `on` or `standby`; `limit=waiting` or `missed`; `auto=off`; `ask=question` or `approval`; `phone=on`; and `theme=dark`.
+To work on the popover without Tauri, serve `src/` (for example with `python3 -m http.server -d src`) and open `index.html`. It loads `preview-mock.js` in place of the backend. Query parameters choose the state: `state=off`, `on` or `standby`; `limit=waiting` or `missed`; `auto=off`; `ask=question` or `approval`; `phone=on`; `update=on`; and `theme=dark`.
 
 `npm run icons` redraws the menu bar and app icons from `scripts/make-icons.py`.
 
 ## Releases
 
-Every push to `main` that changes the app, whether a merged pull request or a direct push, makes a release through [the release workflow](.github/workflows/release.yml). It works out the next version with `scripts/release-version.mjs`, runs the tests, builds a universal app for Apple silicon and Intel, ad-hoc signs it, and publishes `Overnight-macos.zip` on the [Releases page](https://github.com/dienp/overnight/releases). Then it commits the new version to `main` and tags it.
+Every push to `main` that changes the app, whether a merged pull request or a direct push, makes a release through [the release workflow](.github/workflows/release.yml). It works out the next version with `scripts/release-version.mjs`, runs the tests, builds a universal app for Apple silicon and Intel, ad-hoc signs it, and publishes `Overnight-macos.zip` on the [Releases page](https://github.com/dienp/overnight/releases). It also publishes `Overnight.app.tar.gz` and `latest.json`, which the app's updater reads. Then it commits the new version to `main` and tags it.
+
+The updater archive is signed with the key in the `TAURI_SIGNING_PRIVATE_KEY` repository secret. The key has no password, so `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` stays unset. Installed copies only accept archives signed by that key, whose public half is in `src-tauri/tauri.conf.json`. Keep a backup of the private key. If it's lost, a new key needs a new public key in the app, and everyone has to download that version by hand once.
 
 The version goes up by a patch number each time. Put `[minor]` or `[major]` in a commit message for a bigger step, or `[skip release]` to leave a push out. Changes that only touch `docs/` or Markdown files don't release. To see what the next version would be:
 

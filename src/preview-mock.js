@@ -84,9 +84,13 @@ let snap = {
     ntfy_url: params.get("phone") === "on" ? "https://ntfy.sh/overnight-k3m9q2xv7tpa" : "",
     phone_only_when_away: true,
     armed_before: !params.has("firstrun"),
+    check_updates: true,
   },
   last_guard: null,
   error: null,
+  // &update=on: a newer version is waiting.
+  update: params.get("update") === "on" ? { version: "0.1.7", installing: false, error: null } : null,
+  open_at_login: true,
 };
 
 if (limitMode) {
@@ -184,6 +188,19 @@ const handlers = {
   quit: () => undefined,
   open_docs: () => undefined,
   report_problem: () => undefined,
+  open_release: () => undefined,
+  set_open_at_login: ({ enabled }) => {
+    snap.open_at_login = enabled;
+    emit();
+  },
+  install_update: async () => {
+    snap.update = { ...snap.update, installing: true };
+    emit();
+    await new Promise((r) => setTimeout(r, 1500));
+    snap.update = { ...snap.update, installing: false, error: "Couldn't reach GitHub." };
+    emit();
+    throw snap.update.error;
+  },
 };
 
 export async function invoke(cmd, args) {
