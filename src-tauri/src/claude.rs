@@ -2,11 +2,14 @@
 //! trees are) and session transcripts under ~/.claude/projects. A transcript
 //! write or a busy process tree counts as activity. Transcripts also show when
 //! a session stopped on a usage limit and whether it picked up after the reset.
+//! Codex and Cursor sessions are read the same way, by codex.rs and cursor.rs,
+//! and listed alongside.
 
+use crate::{codex, cursor};
 use chrono::{DateTime, Local, NaiveTime, TimeDelta, TimeZone};
 use serde::Serialize;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
@@ -25,7 +28,7 @@ const BUSY_FOR: Duration = Duration::from_secs(15);
 /// How far back the session list looks.
 const RECENT: Duration = Duration::from_secs(12 * 3600);
 const MAX_SESSIONS: usize = 6;
-/// Recent sessions checked for a usage limit, newest first.
+/// Each agent's recent sessions checked, newest first.
 const MAX_SCANNED: usize = 30;
 /// How long after a reset a session has to pick up before it counts as missed.
 pub const RESUME_GRACE: TimeDelta = TimeDelta::minutes(10);
@@ -58,14 +61,40 @@ pub const FIX_PROMPT: &str = "My Claude Code sessions stop when they hit the usa
 2. Look for project or managed settings that turn either of these off.
 3. Check that my Claude Code version is 2.1.234 or later, which auto-continue needs.
 Show me each change before you save it.";
-const TAIL_BYTES: u64 = 256 * 1024;
-const HEAD_BYTES: u64 = 64 * 1024;
+pub(crate) const TAIL_BYTES: u64 = 256 * 1024;
+pub(crate) const HEAD_BYTES: u64 = 64 * 1024;
+
+/// The coding agents whose sessions Overnight follows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub enum Agent {
+    Claude,
+    Codex,
+    Cursor,
+}
+
+impl Agent {
+    pub fn name(self) -> &'static str {
+        match self {
+            Agent::Claude => "Claude",
+            Agent::Codex => "Codex",
+            Agent::Cursor => "Cursor",
+        }
+    }
+
+    /// Whether a busy process tree counts as work. Cursor is an editor: its
+    /// app is busy indexing and drawing whether or not its agent is working,
+    /// so only its transcripts count.
+    fn busy_counts(self) -> bool {
+        self != Agent::Cursor
+    }
+}
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Session {
+    pub agent: Agent,
     pub title: String,
     pub project: String,
-    /// Where to answer it: "Terminal" or "the Claude app", when the
+    /// Where to answer it, e.g. "Terminal" or "the Claude app", when the
     /// transcript says.
     pub place: Option<&'static str>,
     pub idle_secs: u64,
@@ -99,8 +128,9 @@ pub enum Turn {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Ask {
     pub session: PathBuf,
+    pub agent: Agent,
     pub turn: Turn,
-    /// When Claude asked.
+    /// When it asked.
     pub since: SystemTime,
 }
 
@@ -126,16 +156,19 @@ pub struct Limit {
 
 /// A usage-limit error with no normal reply after it.
 #[derive(Clone, Debug)]
-struct LimitHit {
+pub(crate) struct LimitHit {
     resets_at: Option<DateTime<Local>>,
     message: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct ClaudeInfo {
+    /// Every agent's processes together. For Cursor that's the app itself.
     pub processes: usize,
-    /// All Claude process trees together, for display. Activity goes by the
-    /// busiest single tree instead.
+    /// The same, by agent.
+    pub running: BTreeMap<Agent, usize>,
+    /// All Claude and Codex process trees together, for display. Activity
+    /// goes by the busiest single tree instead.
     pub busy_cpu: f32,
     /// Some session is working, or a process tree was busy within the idle time.
     pub active: bool,
@@ -147,6 +180,9 @@ pub struct ClaudeInfo {
     pub needs_you: usize,
     #[serde(skip)]
     pub asks: Vec<Ask>,
+    /// The agents behind `active`, for saying who is done.
+    #[serde(skip)]
+    pub working: BTreeSet<Agent>,
     pub limit: Option<Limit>,
     /// `autoContinueAtUsageLimit` from ~/.claude/settings.json (on unless set
     /// to false). The desktop app's own checkbox lives elsewhere.
@@ -154,19 +190,20 @@ pub struct ClaudeInfo {
     pub fix_prompt: &'static str,
 }
 
+/// What a transcript says, whichever agent wrote it.
 #[derive(Clone)]
-struct Meta {
-    len: u64,
-    title: String,
-    project: String,
-    place: Option<&'static str>,
-    limit: Option<LimitHit>,
-    last_record: Option<SystemTime>,
+pub(crate) struct Meta {
+    pub(crate) len: u64,
+    pub(crate) title: String,
+    pub(crate) project: String,
+    pub(crate) place: Option<&'static str>,
+    pub(crate) limit: Option<LimitHit>,
+    pub(crate) last_record: Option<SystemTime>,
     /// See `turn_state`. An Approval here is only a file edit still open;
     /// `poll` decides when it has waited long enough.
-    turn: Option<(Turn, SystemTime)>,
+    pub(crate) turn: Option<(Turn, SystemTime)>,
     /// See `background_open`.
-    background: bool,
+    pub(crate) background: bool,
 }
 
 pub struct Watcher {
@@ -174,8 +211,12 @@ pub struct Watcher {
     sys: Option<System>,
     projects: PathBuf,
     settings: PathBuf,
+    codex: codex::Dirs,
+    cursor_projects: PathBuf,
     meta: HashMap<PathBuf, Meta>,
     last_busy: Option<SystemTime>,
+    /// Whose tree was busy then.
+    busy_agent: Option<Agent>,
     /// When some tree last went over BUSY_CPU, while it stays over.
     busy_since: Option<SystemTime>,
 }
@@ -186,8 +227,11 @@ impl Watcher {
             sys: System::new().ok(),
             projects: home.join(".claude/projects"),
             settings: home.join(".claude/settings.json"),
+            codex: codex::Dirs::new(home),
+            cursor_projects: home.join(".cursor/projects"),
             meta: HashMap::new(),
             last_busy: None,
+            busy_agent: None,
             busy_since: None,
         }
     }
@@ -198,33 +242,43 @@ impl Watcher {
 
         let usage = self.processes().unwrap_or_default();
         // Without a running process there is nothing left to wait for.
-        let running = self.sys.is_none() || usage.processes > 0;
+        let no_sys = self.sys.is_none();
+        let running = |a: Agent| no_sys || usage.processes.get(&a).is_some_and(|n| *n > 0);
         if sustained(&mut self.busy_since, usage.busiest, now) {
             self.last_busy = Some(now);
+            self.busy_agent = usage.busiest_agent;
         }
         // A session's activity is its newest timestamped record or subagent
         // write, not the file's modified time (see `last_record_time`).
-        let mut recent: Vec<(PathBuf, Meta, SystemTime)> = Vec::new();
-        for t in transcripts(&self.projects)
-            .into_iter()
-            .filter(|t| since(t.written) < RECENT)
-            .take(MAX_SCANNED)
-        {
-            let meta = self.describe(&t.path);
-            if let Some(at) = meta.last_record.max(t.subagents).filter(|at| since(*at) < RECENT) {
-                recent.push((t.path, meta, at));
+        // Cursor's records carry no time, so for Cursor it is.
+        let lists = [
+            transcripts(&self.projects),
+            codex::rollouts(&self.codex),
+            cursor::transcripts(&self.cursor_projects),
+        ];
+        let mut recent: Vec<(PathBuf, Agent, Meta, SystemTime)> = Vec::new();
+        // Each agent's newest, so one agent's touched files can't crowd out another's.
+        for list in lists {
+            for t in list.into_iter().filter(|t| since(t.written) < RECENT).take(MAX_SCANNED) {
+                let meta = self.describe(&t);
+                if let Some(at) = meta.last_record.max(t.subagents).filter(|at| since(*at) < RECENT) {
+                    recent.push((t.path, t.agent, meta, at));
+                }
             }
         }
-        recent.sort_by(|a, b| b.2.cmp(&a.2));
-        let last = recent.first().map(|r| r.2).max(self.last_busy);
+        recent.sort_by(|a, b| b.3.cmp(&a.3));
+        let last = recent.first().map(|r| r.3).max(self.last_busy);
         let idle_secs = last.map(|t| since(t).as_secs());
-        let mut active = running && self.last_busy.is_some_and(|t| since(t) < idle_after);
+        let busy = self.busy_agent.filter(|a| running(*a) && self.last_busy.is_some_and(|t| since(t) < idle_after));
+        let mut active = busy.is_some();
+        let mut working: BTreeSet<Agent> = busy.into_iter().collect();
 
         let local_now = Local::now();
         let mut sessions = Vec::new();
         let mut hits = Vec::new();
         let mut asks = Vec::new();
-        for (path, meta, at) in recent {
+        for (path, agent, meta, at) in recent {
+            let running = running(agent);
             let state = meta.limit.as_ref().and_then(|h| limit_state(h, local_now));
             if state.is_some() {
                 hits.extend(meta.limit.clone());
@@ -237,7 +291,7 @@ impl Watcher {
                 t => Some((t, at)),
             });
             if let Some((t @ (Turn::Question | Turn::Approval), asked)) = turn {
-                asks.push(Ask { session: path, turn: t, since: asked });
+                asks.push(Ask { session: path, agent, turn: t, since: asked });
             }
             let session_active = running
                 && match turn {
@@ -248,7 +302,11 @@ impl Watcher {
                     None => since(at) < idle_after,
                 };
             active |= session_active;
+            if session_active {
+                working.insert(agent);
+            }
             sessions.push(Session {
+                agent,
                 title: meta.title,
                 project: meta.project,
                 place: meta.place,
@@ -266,21 +324,24 @@ impl Watcher {
 
         let auto_continue = auto_continue(&self.settings);
         ClaudeInfo {
-            processes: usage.processes,
+            processes: usage.processes.values().sum(),
+            running: usage.processes,
             busy_cpu: usage.total,
             active,
             idle_secs,
             sessions,
             needs_you: asks.len(),
             asks,
+            working,
             limit,
             auto_continue,
             fix_prompt: FIX_PROMPT,
         }
     }
 
-    /// Counts Claude Code processes and sums CPU across them and everything
-    /// they started (shells, builds, test runners, MCP servers).
+    /// Counts agent processes and sums CPU across the Claude Code and Codex
+    /// ones and everything they started (shells, builds, test runners, MCP
+    /// servers).
     fn processes(&mut self) -> Option<Usage> {
         let sys = self.sys.as_mut()?;
         sys.refresh_processes_specifics(
@@ -298,62 +359,72 @@ impl Watcher {
                 pid: pid.as_u32(),
                 parent: p.parent().map(Pid::as_u32),
                 cpu: p.cpu_usage(),
-                claude: is_claude(p),
+                agent: agent_of(p),
             })
             .collect();
         Some(tree_usage(&procs))
     }
 
-    /// Session title, project folder and any pending usage limit, cached
-    /// until the transcript grows.
-    fn describe(&mut self, path: &Path) -> Meta {
+    /// Session title, project folder, where its turn stands and any pending
+    /// usage limit, cached until the transcript grows.
+    fn describe(&mut self, t: &Transcript) -> Meta {
+        let path = t.path.as_path();
         let len = fs::metadata(path).map_or(0, |m| m.len());
         if let Some(m) = self.meta.get(path).filter(|m| m.len == len) {
             return m.clone();
         }
-        let head = read_range(path, 0, HEAD_BYTES);
-        let mut info = TranscriptInfo {
-            // Where the session started; later records follow any `cd`.
-            cwd: head.lines().find_map(|l| string_field(l, "cwd")),
-            ..Default::default()
-        };
-        let tail = read_range(path, len.saturating_sub(TAIL_BYTES), TAIL_BYTES);
-        info.scan(&tail);
-        if info.title().is_none() {
-            info.scan(&head);
-        }
-        let id = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        let title = info
-            .title()
-            .unwrap_or_else(|| format!("Session {}", id.chars().take(8).collect::<String>()));
-        let project = info
-            .cwd
-            .as_deref()
-            .and_then(|c| Path::new(c).file_name())
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| {
-                path.parent()
-                    .and_then(|p| p.file_name())
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default()
-            });
-        let place = match head.lines().find_map(|l| string_field(l, "entrypoint")).as_deref() {
-            Some("cli") => Some("Terminal"),
-            Some("claude-desktop") => Some("the Claude app"),
-            _ => None,
-        };
-        let meta = Meta {
-            len,
-            title,
-            project,
-            place,
-            limit: unresumed_limit(&tail),
-            last_record: last_record_time(&tail),
-            turn: turn_state(&tail),
-            background: background_open(&tail),
+        let meta = match t.agent {
+            Agent::Claude => describe_claude(path, len),
+            Agent::Codex => codex::describe(path, len, self.codex.titles()),
+            Agent::Cursor => cursor::describe(path, len),
         };
         self.meta.insert(path.to_path_buf(), meta.clone());
         meta
+    }
+}
+
+/// A Claude Code transcript's title, project folder and the rest of `Meta`.
+fn describe_claude(path: &Path, len: u64) -> Meta {
+    let head = read_range(path, 0, HEAD_BYTES);
+    let mut info = TranscriptInfo {
+        // Where the session started; later records follow any `cd`.
+        cwd: head.lines().find_map(|l| string_field(l, "cwd")),
+        ..Default::default()
+    };
+    let tail = read_range(path, len.saturating_sub(TAIL_BYTES), TAIL_BYTES);
+    info.scan(&tail);
+    if info.title().is_none() {
+        info.scan(&head);
+    }
+    let id = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let title = info
+        .title()
+        .unwrap_or_else(|| format!("Session {}", id.chars().take(8).collect::<String>()));
+    let project = info
+        .cwd
+        .as_deref()
+        .and_then(|c| Path::new(c).file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| {
+            path.parent()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        });
+    let place = match head.lines().find_map(|l| string_field(l, "entrypoint")).as_deref() {
+        Some("cli") => Some("Terminal"),
+        Some("claude-desktop") => Some("the Claude app"),
+        _ => None,
+    };
+    Meta {
+        len,
+        title,
+        project,
+        place,
+        limit: unresumed_limit(&tail),
+        last_record: last_record_time(&tail),
+        turn: turn_state(&tail),
+        background: background_open(&tail),
     }
 }
 
@@ -469,32 +540,37 @@ struct Proc {
     pid: u32,
     parent: Option<u32>,
     cpu: f32,
-    claude: bool,
+    agent: Option<Agent>,
 }
 
-/// CPU use of the `claude` processes and everything they started.
+/// How many agent processes run, and the CPU use of the Claude and Codex
+/// ones and everything they started.
 #[derive(Debug, Default)]
 struct Usage {
-    processes: usize,
+    processes: BTreeMap<Agent, usize>,
     /// Every tree together, each process counted once.
     total: f32,
     /// The busiest single tree. A tree inside another counts in both.
     busiest: f32,
+    busiest_agent: Option<Agent>,
 }
 
 fn tree_usage(procs: &[Proc]) -> Usage {
     let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
     let mut cpu: HashMap<u32, f32> = HashMap::new();
+    let mut usage = Usage::default();
     for p in procs {
         cpu.insert(p.pid, p.cpu);
         if let Some(parent) = p.parent {
             children.entry(parent).or_default().push(p.pid);
         }
+        if let Some(agent) = p.agent {
+            *usage.processes.entry(agent).or_default() += 1;
+        }
     }
-    let roots: Vec<u32> = procs.iter().filter(|p| p.claude).map(|p| p.pid).collect();
-    let mut usage = Usage { processes: roots.len(), ..Usage::default() };
+    let roots = procs.iter().filter_map(|p| Some((p.pid, p.agent.filter(|a| a.busy_counts())?)));
     let mut counted = HashSet::new();
-    for root in roots {
+    for (root, agent) in roots {
         let mut seen = HashSet::new();
         let mut stack = vec![root];
         let mut tree = 0.0;
@@ -511,7 +587,10 @@ fn tree_usage(procs: &[Proc]) -> Usage {
                 stack.extend(kids);
             }
         }
-        usage.busiest = usage.busiest.max(tree);
+        if tree > usage.busiest || usage.busiest_agent.is_none() {
+            usage.busiest = tree;
+            usage.busiest_agent = Some(agent);
+        }
     }
     usage
 }
@@ -527,6 +606,18 @@ fn sustained(since: &mut Option<SystemTime>, busiest: f32, now: SystemTime) -> b
     now.duration_since(start).unwrap_or_default() >= BUSY_FOR
 }
 
+fn agent_of(p: &Process) -> Option<Agent> {
+    if is_claude(p) {
+        Some(Agent::Claude)
+    } else if codex::is_codex(p) {
+        Some(Agent::Codex)
+    } else if cursor::is_cursor(p) {
+        Some(Agent::Cursor)
+    } else {
+        None
+    }
+}
+
 fn is_claude(p: &Process) -> bool {
     let name = p.name().to_string_lossy();
     if name == "claude" {
@@ -540,14 +631,15 @@ fn is_claude(p: &Process) -> bool {
         && p.cmd().iter().any(|a| a.to_string_lossy().contains("claude-code"))
 }
 
-struct Transcript {
-    path: PathBuf,
+pub(crate) struct Transcript {
+    pub(crate) path: PathBuf,
+    pub(crate) agent: Agent,
     /// The latest write to the transcript or its subagents. Only narrows the
     /// search: the desktop app touches transcripts nobody is working in.
-    written: SystemTime,
+    pub(crate) written: SystemTime,
     /// The latest write by one of its subagents (`<session>/subagents/*.jsonl`),
     /// which hold nothing but conversation, so this counts as activity.
-    subagents: Option<SystemTime>,
+    pub(crate) subagents: Option<SystemTime>,
 }
 
 /// Session transcripts, most recently written first.
@@ -556,7 +648,7 @@ fn transcripts(projects: &Path) -> Vec<Transcript> {
     let mut bump = |path: PathBuf, t: SystemTime, sub: bool| {
         let e = latest
             .entry(path.clone())
-            .or_insert(Transcript { path, written: t, subagents: None });
+            .or_insert(Transcript { path, agent: Agent::Claude, written: t, subagents: None });
         e.written = e.written.max(t);
         if sub {
             e.subagents = e.subagents.max(Some(t));
@@ -603,7 +695,7 @@ fn transcripts(projects: &Path) -> Vec<Transcript> {
 /// Conversation records (prompts, replies, tool results, retries) carry a
 /// timestamp; the bookkeeping the desktop app appends (titles, cost, artifact
 /// state) doesn't, so this tells real activity apart from a touched file.
-fn last_record_time(tail: &str) -> Option<SystemTime> {
+pub(crate) fn last_record_time(tail: &str) -> Option<SystemTime> {
     tail.lines().rev().find_map(|line| {
         if !line.contains("\"timestamp\"") {
             return None;
@@ -831,16 +923,24 @@ fn closing_ask<'a>(lines: &mut impl Iterator<Item = &'a str>, end_id: Option<&st
     false
 }
 
-fn timestamp(v: &serde_json::Value) -> Option<SystemTime> {
+pub(crate) fn timestamp(v: &serde_json::Value) -> Option<SystemTime> {
     let ts = v.get("timestamp")?.as_str()?;
     DateTime::parse_from_rfc3339(ts).ok().map(SystemTime::from)
 }
 
-fn mtime(path: &Path) -> Option<SystemTime> {
+pub(crate) fn mtime(path: &Path) -> Option<SystemTime> {
     fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
-fn read_range(path: &Path, start: u64, max: u64) -> String {
+/// The folders in `dir`, if it can be read.
+pub(crate) fn subdirs(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries.flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_dir())).map(|e| e.path()).collect()
+}
+
+pub(crate) fn read_range(path: &Path, start: u64, max: u64) -> String {
     let mut buf = Vec::new();
     if let Ok(mut f) = fs::File::open(path) {
         if f.seek(SeekFrom::Start(start)).is_ok() {
@@ -887,7 +987,7 @@ impl TranscriptInfo {
 }
 
 /// Pulls `"key":"value"` out of a JSON line without parsing all of it.
-fn string_field(line: &str, key: &str) -> Option<String> {
+pub(crate) fn string_field(line: &str, key: &str) -> Option<String> {
     let pat = format!("\"{key}\":\"");
     let start = line.find(&pat)? + pat.len();
     let end = line[start..].find('"')?;
@@ -899,7 +999,7 @@ mod tests {
     use super::*;
 
     fn proc(pid: u32, parent: u32, cpu: f32, claude: bool) -> Proc {
-        Proc { pid, parent: Some(parent), cpu, claude }
+        Proc { pid, parent: Some(parent), cpu, agent: claude.then_some(Agent::Claude) }
     }
 
     /// A dozen idle sessions, each with a few tools, add up to more than 20%
@@ -915,7 +1015,7 @@ mod tests {
             }
         }
         let usage = tree_usage(&procs);
-        assert_eq!(usage.processes, 13);
+        assert_eq!(usage.processes[&Agent::Claude], 13);
         assert!(usage.total > BUSY_CPU, "together {}", usage.total);
         assert!(usage.busiest < BUSY_CPU, "busiest {}", usage.busiest);
     }
@@ -930,9 +1030,29 @@ mod tests {
             proc(30, 1, 40.0, false), // not Claude's
         ];
         let usage = tree_usage(&procs);
-        assert_eq!(usage.processes, 2);
+        assert_eq!(usage.processes[&Agent::Claude], 2);
         assert!((usage.busiest - 86.5).abs() < 0.01);
         assert!((usage.total - 87.5).abs() < 0.01);
+    }
+
+    /// A Codex command counts like a Claude one. Cursor's own tree doesn't:
+    /// the editor is busy whether or not its agent works.
+    #[test]
+    fn codex_trees_count_and_cursor_runs_without() {
+        let agent = |pid: u32, cpu: f32, a: Agent| Proc { pid, parent: Some(1), cpu, agent: Some(a) };
+        let procs = vec![
+            agent(10, 0.5, Agent::Claude),
+            agent(20, 0.5, Agent::Codex),
+            proc(21, 20, 60.0, false), // cargo test, run by Codex
+            agent(30, 95.0, Agent::Cursor),
+            proc(31, 30, 40.0, false), // indexing
+        ];
+        let usage = tree_usage(&procs);
+        assert_eq!(usage.processes.values().sum::<usize>(), 3);
+        assert_eq!(usage.processes[&Agent::Cursor], 1);
+        assert_eq!(usage.busiest_agent, Some(Agent::Codex));
+        assert!((usage.busiest - 60.5).abs() < 0.01);
+        assert!((usage.total - 61.0).abs() < 0.01);
     }
 
     /// `claude` started from inside another session's shell.
@@ -940,7 +1060,7 @@ mod tests {
     fn nested_session_is_counted_once_in_total() {
         let procs = vec![proc(10, 1, 2.0, true), proc(11, 10, 1.0, false), proc(12, 11, 30.0, true)];
         let usage = tree_usage(&procs);
-        assert_eq!(usage.processes, 2);
+        assert_eq!(usage.processes[&Agent::Claude], 2);
         assert!((usage.total - 33.0).abs() < 0.01);
         assert!((usage.busiest - 33.0).abs() < 0.01);
     }

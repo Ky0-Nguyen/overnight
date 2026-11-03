@@ -1,4 +1,6 @@
 mod claude;
+mod codex;
+mod cursor;
 mod events;
 mod helper;
 mod links;

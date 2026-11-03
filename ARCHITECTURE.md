@@ -27,6 +27,14 @@ Claude Code writes nothing while a tool runs or a question or permission prompt 
 
 In While Claude works mode the Mac stays awake only while some session is working or a process tree is busy, so it can sleep as soon as everything is done or waiting for you. A question or an approval turns the Claude pill to "needs you" and sends a notification, on the phone too when phone alerts are on.
 
+### Codex and Cursor
+
+Codex and Cursor sessions show in the same list, marked with the agent's name, and count as working the same way, so the Mac stays awake for them too. Notifications about a question or about being done name the agent. Usage limits, auto-continue and background work are Claude's only.
+
+**Codex.** The Codex app and the `codex` command write one rollout file per session under `~/.codex/sessions/<year>/<month>/<day>/`, and keep session names in `~/.codex/session_index.jsonl`. Every turn starts with a `task_started` record and ends with `task_complete`, or `turn_aborted` when you stop it. A turn that has started and not ended counts as working, for up to two hours after its last record, and one that has ended is done. Codex writes nothing while an approval prompt is open, so that counts as working too. An open `request_user_input` call, the terminal's way of asking you something, is waiting for you. The Codex app's questions don't hold up the turn, so they don't count. `codex` processes and what they start count toward the busy check, like Claude's.
+
+**Cursor.** Cursor writes each agent chat to `~/.cursor/projects/<project>/agent-transcripts/<chat>/<chat>.jsonl`, with its subagents' beside it. The records carry no timestamps and no tool results, so activity is the file's modified time. Cursor writes a reply once it's complete, before its tools run, and from Cursor 3 on a `turn_ended` record when the turn is over. A reply with tool calls as the newest record is working, or waiting for you if it calls AskQuestion or CreatePlan. A turn that has ended is done, or waiting for you if its last reply asked. Chats from earlier Cursor versions, without `turn_ended`, go by the idle time. Cursor sessions count only while the Cursor app is open, and its CPU doesn't count: the editor is busy indexing and drawing whether or not its agent works.
+
 ## Usage limits
 
 Claude Code records a usage-limit stop in the session transcript in one of two ways. When the session gives up, it writes an assistant record with `"isApiErrorMessage": true, "error": "rate_limit"` and the reset time, in epoch seconds, in `quotaLimits.resetsAt`. When it waits for the reset and retries (this needs `CLAUDE_CODE_RETRY_WATCHDOG=1`), it writes a system `api_error` record with the reset time in `error.rateLimits.resetsAt`. A session counts as waiting until a normal reply follows.
