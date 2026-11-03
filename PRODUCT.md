@@ -61,7 +61,7 @@ Terminology (use consistently):
 - **Keep awake tonight** / **Let it sleep** for the main action.
 
 Open decisions:
-- Distribution: releases are built and published automatically on every push to main that changes the app (GitHub Releases, universal, ad-hoc signed, not notarized; users approve the first open in Privacy & Security). Still open: an Apple Developer ID for signing and notarization, an in-app update check, and the minimum macOS version (currently 12).
+- Distribution: releases are built and published automatically on every push to main that changes the app (GitHub Releases, universal). The workflow signs them with a Developer ID and notarizes them once the Apple signing secrets are set; until then they're ad-hoc signed and users approve the first open in Privacy & Security. Still open: setting those secrets, an in-app update check, and the minimum macOS version (currently 12).
 - A license for the public repository (none chosen yet).
 - First-run onboarding for people who aren't the author.
 - Phone alerts: whether to support private ntfy servers that need an access token (it would belong in the Keychain), and whether to offer other services such as Pushover.
