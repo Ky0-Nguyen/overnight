@@ -1,7 +1,7 @@
 {
   "name": "overnight",
   "private": true,
-  "version": "0.1.2",
+  "version": "0.1.3",
   "type": "module",
   "scripts": {
     "tauri": "PATH=\"$HOME/.cargo/bin:/opt/homebrew/opt/rustup/bin:$PATH\" tauri",
