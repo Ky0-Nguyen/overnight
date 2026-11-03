@@ -33,6 +33,9 @@ pub const RESUME_GRACE: TimeDelta = TimeDelta::minutes(10);
 const MISSED_FOR: TimeDelta = TimeDelta::hours(2);
 /// Tools that exist to ask the user something: a question, or a plan to approve.
 const ASKING_TOOLS: &[&str] = &["AskUserQuestion", "ExitPlanMode"];
+/// The Claude app's end-of-turn box. A question in it (`ask`) leaves the
+/// turn ended but waiting on the user's answer.
+const WRAP_UP_TOOL: &str = "mcp__ccd_turn__wrap_up";
 /// File edits finish within seconds (2 of about 4,700 took over 30 s), so one
 /// still open after APPROVAL_AFTER is waiting at the permission prompt. Other
 /// tools can't be told apart this way: a quiet Bash command can run for many
@@ -608,7 +611,8 @@ fn turn_state(tail: &str) -> Option<(Turn, SystemTime)> {
     // The reply whose tool calls all have results. Its other parts (one
     // record per content block) may still hold an open call.
     let mut reply_id: Option<String> = None;
-    for line in tail.lines().rev() {
+    let mut lines = tail.lines().rev();
+    while let Some(line) = lines.next() {
         // Untimed records are bookkeeping, not conversation.
         if !line.contains("\"timestamp\"") {
             continue;
@@ -633,8 +637,11 @@ fn turn_state(tail: &str) -> Option<(Turn, SystemTime)> {
                     if reply_id.is_some() {
                         continue;
                     }
-                    let ended = v.pointer("/message/stop_reason").and_then(|r| r.as_str()) == Some("end_turn");
-                    return ended.then_some((Turn::Done, at));
+                    if v.pointer("/message/stop_reason").and_then(|r| r.as_str()) != Some("end_turn") {
+                        return None;
+                    }
+                    let turn = if closing_ask(&mut lines, id) { Turn::Question } else { Turn::Done };
+                    return Some((turn, at));
                 }
                 for call in calls {
                     if answered.contains(call["id"].as_str().unwrap_or_default()) {
@@ -682,6 +689,40 @@ fn turn_state(tail: &str) -> Option<(Turn, SystemTime)> {
         }
     }
     None
+}
+
+/// Did the turn that ends in reply `end_id` ask its question in the app's
+/// end-of-turn box? Reads back from just before that reply to the turn's last
+/// tool call.
+fn closing_ask<'a>(lines: &mut impl Iterator<Item = &'a str>, end_id: Option<&str>) -> bool {
+    for line in lines {
+        if !line.contains("\"timestamp\"") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let blocks = v.pointer("/message/content").and_then(|c| c.as_array());
+        let blocks = blocks.map(Vec::as_slice).unwrap_or_default();
+        match v.get("type").and_then(|t| t.as_str()).unwrap_or_default() {
+            "assistant" => {
+                let mut calls = blocks.iter().filter(|b| b["type"] == "tool_use").peekable();
+                if calls.peek().is_some() {
+                    return calls.any(|c| {
+                        c["name"] == WRAP_UP_TOOL && c.pointer("/input/ask").and_then(|a| a.as_str()).is_some_and(|a| !a.trim().is_empty())
+                    });
+                }
+                if v.pointer("/message/id").and_then(|i| i.as_str()) != end_id {
+                    return false; // an earlier reply with no tool calls
+                }
+            }
+            // The wrap-up's own result; anything else is the user's prompt.
+            "user" if blocks.iter().any(|b| b["type"] == "tool_result") => {}
+            "user" | "system" => return false,
+            _ => {}
+        }
+    }
+    false
 }
 
 fn timestamp(v: &serde_json::Value) -> Option<SystemTime> {
@@ -956,6 +997,20 @@ mod tests {
         assert_eq!(turn(&[ENDED, STOP_HOOKS, PROMPT]), None);
         assert_eq!(turn(&[ENDED, REQUEST]), None);
         assert_eq!(turn(&[LIMIT]), None); // reported as a usage limit instead
+    }
+
+    #[test]
+    fn question_in_the_closing_box_waits_for_the_user() {
+        let wrap = |input: &str| {
+            format!(r#"{{"type":"assistant","timestamp":"2026-11-02T13:27:30.000Z","message":{{"id":"msg_wrap","content":[{{"type":"tool_use","id":"toolu_w","name":"mcp__ccd_turn__wrap_up","input":{input}}}],"stop_reason":"tool_use"}}}}"#)
+        };
+        let asked = wrap(r#"{"recap":"Tests pass.","ask":"Run the plan next?","actions":[{"label":"Yes"}]}"#);
+        let told = wrap(r#"{"recap":"Tests pass."}"#);
+        assert_eq!(turn(&[&asked, &result("toolu_w"), REQUEST, ENDED, STOP_HOOKS]), Some(Turn::Question));
+        assert_eq!(turn(&[&told, &result("toolu_w"), REQUEST, ENDED, STOP_HOOKS]), Some(Turn::Done));
+        // A later turn that ends without the box doesn't inherit the question.
+        assert_eq!(turn(&[&asked, &result("toolu_w"), ENDED, PROMPT, ENDED]), Some(Turn::Done));
+        assert_eq!(turn(&[&asked, &result("toolu_w"), ENDED, PROMPT]), None);
     }
 
     /// Two calls in one reply, written as two records: the first is still open.
