@@ -46,6 +46,11 @@ const APPROVAL_AFTER: Duration = Duration::from_secs(60);
 /// nothing written: tool calls have taken up to about 70 minutes. After
 /// that the session most likely stopped mid-call.
 const RUNNING_FOR: Duration = Duration::from_secs(2 * 3600);
+/// A turn can end with background work still going: a command, a subagent or
+/// a monitor whose result starts the next turn by itself. That counts as
+/// working for this long after the turn ended; a dev server left running
+/// never reports back.
+const BACKGROUND_FOR: Duration = Duration::from_secs(2 * 3600);
 
 /// For pasting into a Claude session when sessions don't continue after a reset.
 pub const FIX_PROMPT: &str = "My Claude Code sessions stop when they hit the usage limit and don't continue after it resets, even though my Mac stays awake overnight. Please check and fix this:
@@ -83,6 +88,9 @@ pub enum Turn {
     Approval,
     /// A tool call is running.
     Running,
+    /// Its reply ended the turn, but background work it started is still
+    /// going, and its result starts the next turn.
+    Background,
     /// Its reply ended the turn, or the user interrupted it.
     Done,
 }
@@ -157,6 +165,8 @@ struct Meta {
     /// See `turn_state`. An Approval here is only a file edit still open;
     /// `poll` decides when it has waited long enough.
     turn: Option<(Turn, SystemTime)>,
+    /// See `background_open`.
+    background: bool,
 }
 
 pub struct Watcher {
@@ -223,6 +233,7 @@ impl Watcher {
             let turn = meta.turn.filter(|_| running).and_then(|(t, at)| match t {
                 Turn::Approval if since(at) < APPROVAL_AFTER => Some((Turn::Running, at)),
                 Turn::Running if since(at) >= RUNNING_FOR => None,
+                Turn::Done if meta.background && since(at) < BACKGROUND_FOR => Some((Turn::Background, at)),
                 t => Some((t, at)),
             });
             if let Some((t @ (Turn::Question | Turn::Approval), asked)) = turn {
@@ -230,7 +241,9 @@ impl Watcher {
             }
             let session_active = running
                 && match turn {
-                    Some((Turn::Running, _)) => true,
+                    Some((Turn::Running | Turn::Background, _)) => true,
+                    // It also picks up by itself once its background work reports back.
+                    Some((Turn::Question, at)) => meta.background && since(at) < BACKGROUND_FOR,
                     Some(_) => false,
                     None => since(at) < idle_after,
                 };
@@ -337,6 +350,7 @@ impl Watcher {
             limit: unresumed_limit(&tail),
             last_record: last_record_time(&tail),
             turn: turn_state(&tail),
+            background: background_open(&tail),
         };
         self.meta.insert(path.to_path_buf(), meta.clone());
         meta
@@ -691,6 +705,98 @@ fn turn_state(tail: &str) -> Option<(Turn, SystemTime)> {
     None
 }
 
+/// Is a background task the session started still going? Background
+/// commands and subagents name their task in the tool result, monitors too;
+/// each ends with a task notification that has a status, or a TaskStop.
+fn background_open(tail: &str) -> bool {
+    let mut starts: HashSet<String> = HashSet::new();
+    let mut open: HashSet<String> = HashSet::new();
+    for line in tail.lines() {
+        if !line.contains("\"timestamp\"") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let content = v.pointer("/message/content");
+        let blocks = content.and_then(|c| c.as_array()).map(Vec::as_slice).unwrap_or_default();
+        match v.get("type").and_then(|t| t.as_str()).unwrap_or_default() {
+            "assistant" => {
+                for call in blocks.iter().filter(|b| b["type"] == "tool_use") {
+                    let input = &call["input"];
+                    match call["name"].as_str().unwrap_or_default() {
+                        "Bash" if input["run_in_background"] == true => {}
+                        // Subagents launch in the background with or without the flag.
+                        "Agent" | "Monitor" => {}
+                        "TaskStop" => {
+                            open.remove(input["task_id"].as_str().unwrap_or_default());
+                            continue;
+                        }
+                        _ => continue,
+                    }
+                    starts.insert(call["id"].as_str().unwrap_or_default().to_string());
+                }
+            }
+            "user" => {
+                for b in blocks {
+                    if b["type"] == "tool_result" {
+                        let started = b["tool_use_id"].as_str().is_some_and(|id| starts.remove(id));
+                        if let Some(task) = started.then(|| started_task(&b["content"])).flatten() {
+                            open.insert(task);
+                        }
+                    } else if let Some(text) = b["text"].as_str() {
+                        close_notified(text, &mut open);
+                    }
+                }
+                if let Some(text) = content.and_then(|c| c.as_str()) {
+                    close_notified(text, &mut open);
+                }
+            }
+            // A notification that arrived while Claude was busy.
+            "attachment" if v.pointer("/attachment/type").and_then(|t| t.as_str()) == Some("queued_command") => {
+                if let Some(text) = v.pointer("/attachment/prompt").and_then(|p| p.as_str()) {
+                    close_notified(text, &mut open);
+                }
+            }
+            _ => {}
+        }
+    }
+    !open.is_empty()
+}
+
+/// The task a background start names: "Command running in background with
+/// ID: b8s7p075a.", "Async agent launched … agentId: a0f94c8b4e0c75ede",
+/// "Monitor started (task b4ked3ohd, …". A subagent that ran in the
+/// foreground also names its agentId, next to its report.
+fn started_task(content: &serde_json::Value) -> Option<String> {
+    let text = match content {
+        serde_json::Value::String(s) => s.as_str(),
+        serde_json::Value::Array(parts) => parts.iter().find_map(|p| p["text"].as_str())?,
+        _ => return None,
+    };
+    let agent = text.starts_with("Async agent launched").then_some("agentId: ");
+    ["with ID: ", "Monitor started (task "].into_iter().chain(agent).find_map(|mark| {
+        let rest = &text[text.find(mark)? + mark.len()..];
+        let id: String = rest.chars().take_while(char::is_ascii_alphanumeric).collect();
+        (!id.is_empty()).then_some(id)
+    })
+}
+
+/// Closes each task whose notification in `text` has a status. A monitor's
+/// events come without one.
+fn close_notified(text: &str, open: &mut HashSet<String>) {
+    for note in text.split("<task-notification>").skip(1) {
+        let note = note.split("</task-notification>").next().unwrap_or_default();
+        let tag = |name: &str| {
+            let rest = &note[note.find(&format!("<{name}>"))? + name.len() + 2..];
+            Some(rest[..rest.find('<')?].trim().to_string())
+        };
+        if let (Some(task), Some(_)) = (tag("task-id"), tag("status")) {
+            open.remove(&task);
+        }
+    }
+}
+
 /// Did the turn that ends in reply `end_id` ask its question in the app's
 /// end-of-turn box? Reads back from just before that reply to the turn's last
 /// tool call.
@@ -1011,6 +1117,43 @@ mod tests {
         // A later turn that ends without the box doesn't inherit the question.
         assert_eq!(turn(&[&asked, &result("toolu_w"), ENDED, PROMPT, ENDED]), Some(Turn::Done));
         assert_eq!(turn(&[&asked, &result("toolu_w"), ENDED, PROMPT]), None);
+    }
+
+    #[test]
+    fn background_work_keeps_going_after_the_turn() {
+        let start = |id: &str, name: &str, input: &str| {
+            format!(r#"{{"type":"assistant","timestamp":"2026-11-02T13:20:00.000Z","message":{{"id":"msg_{id}","content":[{{"type":"tool_use","id":"{id}","name":"{name}","input":{input}}}],"stop_reason":"tool_use"}}}}"#)
+        };
+        let started = |id: &str, text: &str| {
+            format!(r#"{{"type":"user","timestamp":"2026-11-02T13:20:01.000Z","message":{{"role":"user","content":[{{"tool_use_id":"{id}","type":"tool_result","content":[{{"type":"text","text":"{text}"}}]}}]}}}}"#)
+        };
+        let note = |task: &str, status: &str| {
+            format!(r#"{{"type":"user","timestamp":"2026-11-02T13:40:00.000Z","message":{{"role":"user","content":"<task-notification>\n<task-id>{task}</task-id>\n{status}<summary>Done</summary>\n</task-notification>"}}}}"#)
+        };
+        let open = |lines: &[&str]| background_open(&(lines.join("\n") + "\n"));
+        let bash = start("toolu_s", "Bash", r#"{"command":"make","run_in_background":true}"#);
+        let bash_up = started("toolu_s", "Command running in background with ID: b8s7p075a. Output is being written to: /tmp/x");
+        assert!(open(&[&bash, &bash_up, ENDED]));
+        assert!(!open(&[&bash, &bash_up, ENDED, &note("b8s7p075a", "<status>completed</status>")]));
+        // A command in the foreground isn't background work.
+        assert!(!open(&[&start("toolu_s", "Bash", r#"{"command":"make"}"#), &result("toolu_s"), ENDED]));
+        let report = started("toolu_a", "Here's what I found. agentId: a0f94c8b4e0c75ede");
+        assert!(!open(&[&start("toolu_a", "Agent", r#"{"prompt":"look"}"#), &report, ENDED]));
+
+        let agent = start("toolu_a", "Agent", r#"{"prompt":"look"}"#);
+        let agent_up = started("toolu_a", "Async agent launched successfully. agentId: a0f94c8b4e0c75ede (internal ID)");
+        assert!(open(&[&agent, &agent_up, ENDED]));
+        let stop = start("toolu_t", "TaskStop", r#"{"task_id":"a0f94c8b4e0c75ede"}"#);
+        assert!(!open(&[&agent, &agent_up, &stop, &result("toolu_t"), ENDED]));
+
+        // A monitor's events don't end it; the notice with a status does.
+        let monitor = start("toolu_m", "Monitor", r#"{"command":"watch ci"}"#);
+        let monitor_up = started("toolu_m", "Monitor started (task b4ked3ohd, expires in 30m)");
+        assert!(open(&[&monitor, &monitor_up, &note("b4ked3ohd", "<event>build: ok</event>"), ENDED]));
+        assert!(!open(&[&monitor, &monitor_up, &note("b4ked3ohd", "<status>completed</status>"), ENDED]));
+        // Arrived while Claude was busy, so it was queued.
+        let queued = r#"{"type":"attachment","timestamp":"2026-11-02T13:40:00.000Z","attachment":{"type":"queued_command","prompt":"<task-notification>\n<task-id>b4ked3ohd</task-id>\n<status>failed</status>\n</task-notification>"}}"#;
+        assert!(!open(&[&monitor, &monitor_up, queued, ENDED]));
     }
 
     /// Two calls in one reply, written as two records: the first is still open.

@@ -20,9 +20,10 @@ A recorded event is a timestamped record, such as a prompt, a reply, a tool resu
 
 Claude Code writes nothing while a tool runs or a question or permission prompt is open, so Overnight reads where each session's turn stands from its newest conversation records:
 
-- **Waiting for you:** an `AskUserQuestion` or `ExitPlanMode` call with no result yet, or an Edit or Write call still open after a minute. File edits finish within seconds, so that one is at the permission prompt.
+- **Waiting for you:** an `AskUserQuestion` or `ExitPlanMode` call with no result yet, or an Edit or Write call still open after a minute. File edits finish within seconds, so that one is at the permission prompt. A turn that ends with a question in the Claude app's next-step box is waiting for you too.
 - **Working:** any other open tool call, for up to two hours even if it writes nothing (tool calls have taken up to about 70 minutes; after two hours the session most likely stopped mid-call). Otherwise, activity within the idle time.
-- **Done:** a reply that ended the turn, or a turn you interrupted.
+- **Working in the background:** a turn that ended while a background command, subagent or monitor it started is still going, for up to two hours after the turn ended. Its result starts the next turn by itself; in a replay of 400 transcripts, background work started about half of all turns. A task counts as finished once a task notification with a status arrives, or Claude stops it.
+- **Done:** a reply that ended the turn with nothing left in the background, or a turn you interrupted.
 
 In While Claude works mode the Mac stays awake only while some session is working or a process tree is busy, so it can sleep as soon as everything is done or waiting for you. A question or an approval turns the Claude pill to "needs you" and sends a notification, on the phone too when phone alerts are on.
 

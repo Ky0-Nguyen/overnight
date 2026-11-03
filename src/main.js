@@ -307,6 +307,7 @@ function renderClaude(c) {
           question: "\nAsked you something and is waiting for your answer.",
           approval: "\nWaiting for you to allow a file change.",
           running: "\nRunning a tool.",
+          background: "\nIts turn ended, but work it started in the background is still going.",
           done: "\nDone.",
         }[x.turn] || "";
     li.title = `${x.title}\n${x.project}${why}`;
