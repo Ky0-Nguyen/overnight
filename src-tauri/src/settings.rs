@@ -92,6 +92,9 @@ pub struct Settings {
     pub armed_before: bool,
     /// Look for new versions on GitHub now and then, and say when there is one.
     pub check_updates: bool,
+    /// Install a version those checks find without asking, once Overnight
+    /// isn't keeping the Mac awake.
+    pub install_updates: bool,
 }
 
 impl Default for Settings {
@@ -112,6 +115,7 @@ impl Default for Settings {
             phone_only_when_away: true,
             armed_before: false,
             check_updates: true,
+            install_updates: false,
         }
     }
 }
@@ -201,5 +205,7 @@ mod tests {
         assert_eq!(s.mode, Mode::Night);
         assert_eq!(s.idle_minutes, 15);
         assert!(s.check_updates);
+        // Installing without asking is something you turn on.
+        assert!(!s.install_updates);
     }
 }

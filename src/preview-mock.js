@@ -86,6 +86,7 @@ let snap = {
     phone_only_when_away: true,
     armed_before: !params.has("firstrun"),
     check_updates: true,
+    install_updates: params.get("autoinstall") === "on",
   },
   last_guard: null,
   error: null,

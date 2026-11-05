@@ -1,7 +1,8 @@
 //! New versions from GitHub Releases. Overnight looks for one now and then and
-//! says when it finds one, but installs only when asked, and never while it's
-//! keeping the Mac awake: the restart would end the night, since the helper
-//! puts normal sleep back as soon as this process is gone.
+//! says when it finds one, but installs only when asked, or by itself if you
+//! turn that on, and never while it's keeping the Mac awake: the restart would
+//! end the night, since the helper puts normal sleep back as soon as this
+//! process is gone.
 
 use crate::{
     events,
@@ -62,16 +63,41 @@ pub fn spawn(app: AppHandle) {
         thread::sleep(FIRST_CHECK);
         let mut last: Option<SystemTime> = None;
         loop {
-            let on = app.state::<Shared>().lock().unwrap().settings.check_updates;
+            let (on, by_itself) = {
+                let core = app.state::<Shared>();
+                let core = core.lock().unwrap();
+                (core.settings.check_updates, core.settings.install_updates)
+            };
             let now = SystemTime::now();
             if on && due(last, now) {
                 // A failed check (offline, say) waits for the next one too.
                 last = Some(now);
                 let _ = check(&app);
             }
+            // Asked each time the thread wakes, so a version found during
+            // the night installs soon after the night ends.
+            if on && by_itself && ready_now(&app) {
+                let _ = tauri::async_runtime::block_on(install(app.clone(), true));
+            }
             thread::sleep(WAKE);
         }
     });
+}
+
+fn ready_now(app: &AppHandle) -> bool {
+    let busy = app.state::<Shared>().lock().unwrap().busy();
+    // The popover's window exists only while it's open or just closed.
+    let open = app.get_webview_window("main").is_some_and(|w| w.is_visible().unwrap_or(false));
+    let st = app.state::<Updates>().inner().0.lock().unwrap();
+    ready(st.found.is_some(), st.installing, st.error.as_deref(), busy, open)
+}
+
+/// Whether to install the version found without asking: not while the Mac
+/// is kept awake or you're looking at the popover, and after a failed try
+/// not until the next check finds the version again. Waiting for the night
+/// to end doesn't count as failing.
+fn ready(found: bool, installing: bool, error: Option<&str>, busy: bool, popover_open: bool) -> bool {
+    found && !installing && error.is_none_or(|e| e == BUSY) && !busy && !popover_open
 }
 
 /// The tray's Check for Updates: checks now, even with checking turned off,
@@ -103,19 +129,29 @@ fn check(app: &AppHandle) -> Result<Option<String>, String> {
             st.error = None;
         }
     }
-    let log = app.state::<Shared>().lock().unwrap().paths.log.clone();
+    let (log, by_itself) = {
+        let core = app.state::<Shared>();
+        let core = core.lock().unwrap();
+        (core.paths.log.clone(), core.settings.check_updates && core.settings.install_updates)
+    };
     let seen = log.with_file_name("update-announced");
     if fs::read_to_string(&seen).ok().as_deref().map(str::trim) != Some(version.as_str()) {
         let _ = fs::write(&seen, &version);
         events::append(&log, "update_available", format!("Overnight {version} is available"), None);
-        notify(app, &format!("Overnight {version} is available"), "Open Overnight to update.");
+        let body = if by_itself {
+            "It installs by itself once Overnight isn't keeping the Mac awake."
+        } else {
+            "Open Overnight to update."
+        };
+        notify(app, &format!("Overnight {version} is available"), body);
     }
     app.state::<Kicker>().kick();
     Ok(Some(version))
 }
 
-/// Downloads and installs the version found, then restarts into it.
-pub async fn install(app: AppHandle) -> Result<(), String> {
+/// Downloads and installs the version found, then restarts into it: when
+/// asked in the popover, or `by_itself` when the setting allows.
+pub async fn install(app: AppHandle, by_itself: bool) -> Result<(), String> {
     let busy = || app.state::<Shared>().lock().unwrap().busy();
     if busy() {
         return Err(BUSY.into());
@@ -151,6 +187,13 @@ pub async fn install(app: AppHandle) -> Result<(), String> {
     }
     let log = app.state::<Shared>().lock().unwrap().paths.log.clone();
     events::append(&log, "updated", format!("Updated to {}", update.version), None);
+    if by_itself {
+        notify(
+            &app,
+            &format!("Overnight updated to {}", update.version),
+            "Install updates automatically is on, under Overnight in the popover.",
+        );
+    }
     app.restart();
 }
 
@@ -178,5 +221,18 @@ mod tests {
         assert!(!due(Some(t), t + Duration::from_secs(5 * 3600)));
         assert!(due(Some(t), t + EVERY));
         assert!(due(Some(t), t - Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn installs_by_itself_only_when_idle() {
+        assert!(ready(true, false, None, false, false));
+        assert!(!ready(false, false, None, false, false)); // nothing found
+        assert!(!ready(true, true, None, false, false)); // already installing
+        assert!(!ready(true, false, None, true, false)); // keeping the Mac awake
+        assert!(!ready(true, false, None, false, true)); // popover open
+        // A failed download waits for the next check; a night that started
+        // during the download doesn't.
+        assert!(!ready(true, false, Some("signature mismatch"), false, false));
+        assert!(ready(true, false, Some(BUSY), false, false));
     }
 }

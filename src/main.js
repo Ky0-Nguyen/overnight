@@ -77,7 +77,7 @@ function render(s) {
   renderSettings();
   renderUpdate(s);
   $("login").checked = s.open_at_login;
-  setText($("check-updates-sub"), `Version ${s.version}. Looks for new versions on GitHub and asks before installing.`);
+  setText($("check-updates-sub"), `Version ${s.version}. Looks for new versions on GitHub.`);
   renderClaude(s.claude);
   renderLimit(s);
   renderGuards(s);
@@ -164,19 +164,25 @@ function renderSettings() {
   setValue("warn-gb", s.storage_warn_gb);
   setValue("cleanup-prompt", s.cleanup_prompt);
   $("check-updates").checked = s.check_updates;
+  // Installing by itself goes by what the checks find.
+  $("install-updates").checked = s.install_updates;
+  $("install-updates").disabled = !s.check_updates;
 }
 
-// A newer version on GitHub. It installs only from here, and not while the
-// Mac is being kept awake: the restart would end the night.
+// A newer version on GitHub. It installs from here, or by itself when that's
+// on, and not while the Mac is being kept awake: the restart would end the night.
 function renderUpdate(s) {
   const u = s.update;
   $("update").hidden = !u;
   if (!u) return;
   const busy = s.armed || armPending;
+  const later = settings.check_updates && settings.install_updates
+    ? "It installs by itself once Overnight stops keeping the Mac awake."
+    : "You can update once it stops keeping the Mac awake.";
   setText($("update-title"), `Overnight ${u.version} is available`);
   const detail = u.installing
     ? "Downloading. Overnight restarts when it's done."
-    : u.error || (busy ? "You can update once it stops keeping the Mac awake." : `You have ${s.version}.`);
+    : u.error || (busy ? later : `You have ${s.version}.`);
   setText($("update-detail"), detail);
   $("update-detail").className = u.error && !u.installing ? "sub bad" : "sub";
   setText($("update-install"), u.installing ? "Updating…" : "Update");
@@ -733,6 +739,7 @@ function bind() {
   });
   $("update-notes").addEventListener("click", () => invoke("open_release"));
   $("check-updates").addEventListener("change", (e) => update({ check_updates: e.target.checked }));
+  $("install-updates").addEventListener("change", (e) => update({ install_updates: e.target.checked }));
   // macOS holds this one, not the settings file.
   $("login").addEventListener("change", async (e) => {
     try {

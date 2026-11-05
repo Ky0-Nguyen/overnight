@@ -46,6 +46,7 @@ Capabilities today:
 - Storage: free-space warning, a scan of common space hogs, and **Ask Claude to clean up**, which opens Claude Code in Terminal.
 - Log: a timeline of each night with a summary of time held awake, time Claude was busy, and the battery change.
 - Phone alerts through ntfy: the notifications the user picks for the phone, sent only while the user is away by default (lid closed, or no input for 5 minutes). They never name a session or project. Claude's own phone push needs Remote Control, which organizations can turn off (the author's has), so Overnight doesn't rely on it.
+- Updates: checks GitHub every 6 hours, says when a version is out and installs it from the Update bar. **Install updates automatically**, off by default, installs it without asking once Overnight isn't keeping the Mac awake. Neither restarts the app mid-night.
 
 Binding constraints (confirmed):
 - **No permanent root.** Never install sudoers rules, launch daemons or anything system-wide. A root helper is started through the macOS admin prompt at most once per night and exits when released or when the app quits.
@@ -62,7 +63,7 @@ Terminology (use consistently):
 - **Keep awake tonight** / **Let it sleep** for the main action.
 
 Open decisions:
-- Distribution: releases are built and published automatically on every push to main that changes the app (GitHub Releases, universal). The workflow signs them with a Developer ID and notarizes them once the Apple signing secrets are set; until then they're ad-hoc signed and users approve the first open in Privacy & Security. Still open: setting those secrets, an in-app update check, and the minimum macOS version (currently 12).
+- Distribution: releases are built and published automatically on every push to main that changes the app (GitHub Releases, universal). The workflow signs them with a Developer ID and notarizes them once the Apple signing secrets are set; until then they're ad-hoc signed and users approve the first open in Privacy & Security. Still open: setting those secrets, and the minimum macOS version (currently 12).
 - A license for the public repository (none chosen yet).
 - First-run onboarding for people who aren't the author.
 - Phone alerts: whether to support private ntfy servers that need an access token (it would belong in the Keychain), and whether to offer other services such as Pushover.

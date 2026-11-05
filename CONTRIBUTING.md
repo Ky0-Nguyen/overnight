@@ -28,7 +28,7 @@ sh scripts/test-helper.sh           # the root helper, with pmset and ioreg stub
 src-tauri/target/debug/overnight --probe   # print live readings as JSON
 ```
 
-To work on the popover without Tauri, serve `src/` (for example with `python3 -m http.server -d src`) and open `index.html`. It loads `preview-mock.js` in place of the backend. Query parameters choose the state: `state=off`, `on` or `standby`; `limit=waiting` or `missed`; `auto=off`; `ask=question` or `approval`; `phone=on`; `update=on`; and `theme=dark`.
+To work on the popover without Tauri, serve `src/` (for example with `python3 -m http.server -d src`) and open `index.html`. It loads `preview-mock.js` in place of the backend. Query parameters choose the state: `state=off`, `on` or `standby`; `limit=waiting` or `missed`; `auto=off`; `ask=question` or `approval`; `phone=on`; `update=on`; `autoinstall=on`; and `theme=dark`.
 
 `npm run icons` redraws the menu bar and app icons from `scripts/make-icons.py`.
 

@@ -138,7 +138,7 @@ fn popover_ready(kick: State<Kicker>) {
 /// version, so this only ever returns an error.
 #[tauri::command]
 async fn install_update(app: AppHandle) -> Result<(), String> {
-    updates::install(app).await
+    updates::install(app, false).await
 }
 
 #[tauri::command]

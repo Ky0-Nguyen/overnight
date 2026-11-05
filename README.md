@@ -14,7 +14,7 @@ A macOS menu bar app that keeps a MacBook awake with the lid closed while Claude
 
 Overnight isn't notarized by Apple yet. The first time you open it, go to System Settings › Privacy & Security and click Open Anyway.
 
-After that, Overnight opens when you log in and tells you when a new version is out. It installs one only when you click Update. You can turn off either one in the popover.
+After that, Overnight opens when you log in and tells you when a new version is out. It installs one only when you click Update, or by itself if you turn on Install updates automatically. You can turn off either one in the popover.
 
 ## How it works
 
