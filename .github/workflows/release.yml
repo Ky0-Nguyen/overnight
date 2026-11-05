@@ -17,6 +17,8 @@ on:
 
 permissions:
   contents: write
+  # To see whether another release run is queued behind this one.
+  actions: read
 
 # One release at a time, in order.
 concurrency:
@@ -32,12 +34,12 @@ jobs:
       # Until then the app is ad-hoc signed and isn't notarized.
       NOTARIZE: ${{ secrets.APPLE_CERTIFICATE != '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: main
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -118,18 +120,34 @@ jobs:
           cat latest.json
 
       - name: Commit the version and tag it
+        id: tag
         env:
+          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git diff --quiet || git commit -am "Release v$VERSION [skip release]"
           git tag "v$VERSION"
-          # Both or neither. If main moved while this built, the push fails and
-          # the run queued behind this one releases the newer code instead.
-          git push --atomic origin HEAD:main "v$VERSION"
+          # Both or neither.
+          if git push --atomic origin HEAD:main "v$VERSION"; then
+            echo "pushed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # If main moved while this built, the push fails and the run queued
+          # behind this one releases the newer code instead, so this one stops
+          # here. Without such a run, nothing else would release it.
+          git fetch --quiet origin main
+          queued=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow release.yml --branch main --json status \
+            --jq '[.[] | select(.status == "queued" or .status == "pending" or .status == "waiting" or .status == "requested")] | length')
+          if git merge-base --is-ancestor FETCH_HEAD HEAD || [ "$queued" -eq 0 ]; then
+            echo "::error::Couldn't push v$VERSION to main."
+            exit 1
+          fi
+          echo "::notice::main moved on while this built. The run queued behind this one releases the newer code."
 
       - name: Publish the release
+        if: steps.tag.outputs.pushed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
