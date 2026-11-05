@@ -38,6 +38,7 @@ Capabilities today:
 - Keep awake with the lid closed, in two modes: **While Claude works** and **All night**. Each has an optional **Stop at** time.
 - Guards: battery floor (sleep below 10% by default), heat, and stop time. The root helper also has its own failsafe at 8% battery.
 - Claude session list with status: *working*, *needs you* (a question or a file change to approve), *idle*, *paused* (usage limit, waiting for the reset), *stopped* (didn't continue after a reset), *not running*. A session whose turn ended counts as done straight away.
+- Codex and Cursor sessions are listed with Claude's, marked with the agent's name, and keep the Mac awake while they work. Questions and "done" notes name the agent. Usage limits and background work are Claude's only.
 - Usage limits: a paused session counts as not working, so the Mac doesn't stay up for a reset; Claude's auto-continue is expected to pick the work up. Overnight notifies if Claude didn't continue, and shows how to resume and how to turn on auto-continue.
 - Notifications: each kind (Claude asks you something, is done, hits a usage limit, doesn't continue after one; stop time, low battery or heat, helper stopped, sleep changed outside Overnight; low disk space) has its own Mac and Phone switch, all on by default.
 - Morning summary: the first open after a run turns the popover's top into "Last night": the run's times, how it ended, Claude's working time, time held awake and the battery change, plus any sessions that need the user.
@@ -66,6 +67,7 @@ Open decisions:
 - First-run onboarding for people who aren't the author.
 - Phone alerts: whether to support private ntfy servers that need an access token (it would belong in the Keychain), and whether to offer other services such as Pushover.
 - An accessibility standard. The popover now meets WCAG AA contrast in both themes, has a visible focus ring, announces status changes and links its tabs to their panels; nothing formal has been decided beyond that.
+- Wording now that Codex and Cursor count: the mode, the pill, the status lines and the log still say Claude.
 
 ## Brand Commitments
 

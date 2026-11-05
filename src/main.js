@@ -304,7 +304,9 @@ function renderClaude(c) {
     const asking = x.turn === "question" || x.turn === "approval";
     // Where to answer, in words, not only in the tooltip.
     const where = x.place ? `${x.turn === "question" ? "Answer" : "Approve"} it in ${x.place}` : "Open the session to answer";
-    text.append(el("div", "s-title", x.title), el("span", "s-project", asking ? `${where} · ${x.project}` : x.project));
+    // Claude's sessions are the usual ones; the others say whose they are.
+    const project = [x.agent !== "Claude" && x.agent, x.project].filter(Boolean).join(" · ");
+    text.append(el("div", "s-title", x.title), el("span", "s-project", asking ? `${where} · ${project}` : project));
     const stopped = x.limit === "missed";
     const right = x.limit
       ? el("span", stopped ? "s-limit missed" : "s-limit", stopped ? "stopped" : "paused")
@@ -331,11 +333,15 @@ function renderClaude(c) {
           background: "\nIts turn ended, but work it started in the background is still going.",
           done: "\nDone.",
         }[x.turn] || "";
-    li.title = `${x.title}\n${x.project}${why}`;
+    li.title = `${x.title}\n${project}${why}`;
     list.append(li);
   }
-  const procs = c.processes === 1 ? "1 Claude process" : `${c.processes} Claude processes`;
-  $("claude-meta").textContent = `${procs}, using ${Math.round(c.busy_cpu)}% CPU with their tools`;
+  // Cursor's own CPU isn't measured: the editor is busy whether or not its agent works.
+  const counts = Object.entries(c.running).filter(([agent]) => agent !== "Cursor");
+  const n = counts.reduce((sum, [, k]) => sum + k, 0);
+  const who = counts.length ? counts.map(([agent, k]) => `${k} ${agent}`).join(" and ") : "0 Claude";
+  const cursor = c.running.Cursor ? "; Cursor is open" : "";
+  $("claude-meta").textContent = `${who} ${n === 1 ? "process" : "processes"}, using ${Math.round(c.busy_cpu)}% CPU with their tools${cursor}`;
 }
 
 // Usage limits: while sessions wait for a reset, and when they didn't

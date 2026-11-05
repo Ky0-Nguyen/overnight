@@ -18,7 +18,7 @@ After that, Overnight opens when you log in and tells you when a new version is 
 
 ## How it works
 
-Only root can keep a MacBook awake with its lid closed, so Overnight asks for your password once a night and starts a small helper that exits when the night ends. Nothing is installed system-wide. Overnight reads Claude Code's session transcripts to tell when Claude is working, needs you, or is done, and it lets the Mac sleep below 10% battery or when it runs hot. [ARCHITECTURE.md](ARCHITECTURE.md) has the details.
+Only root can keep a MacBook awake with its lid closed, so Overnight asks for your password once a night and starts a small helper that exits when the night ends. Nothing is installed system-wide. Overnight reads Claude Code's session transcripts to tell when Claude is working, needs you, or is done, and it lets the Mac sleep below 10% battery or when it runs hot. Codex and Cursor sessions count too. [ARCHITECTURE.md](ARCHITECTURE.md) has the details.
 
 A Mac kept awake in a bag gets hot, so leave it somewhere with airflow.
 

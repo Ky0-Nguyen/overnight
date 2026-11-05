@@ -3,7 +3,7 @@
 //! popover and the menu bar icon.
 
 use crate::{
-    claude::{Ask, ClaudeInfo, LimitState, Turn, Watcher},
+    claude::{Agent, Ask, ClaudeInfo, LimitState, Turn, Watcher},
     events, helper, login, phone,
     settings::{Alert, Mode, Settings},
     storage,
@@ -13,6 +13,7 @@ use crate::{
 use chrono::{DateTime, Local, TimeDelta};
 use serde::Serialize;
 use std::{
+    collections::BTreeSet,
     path::{Path, PathBuf},
     sync::{
         mpsc::{Receiver, RecvTimeoutError, Sender},
@@ -119,6 +120,8 @@ pub struct Core {
     /// How long the spell of work that just ended lasted, until its "done"
     /// note goes out or is skipped.
     worked: Option<Duration>,
+    /// The agents that worked in that spell, for its "done" note.
+    worked_by: BTreeSet<Agent>,
     /// The usage-limit state seen last tick, to log and notify on changes.
     limit_seen: Option<(LimitState, Option<DateTime<Local>>)>,
     /// Questions and approvals seen last tick, so each is announced once.
@@ -167,6 +170,7 @@ impl Core {
             claude_active: false,
             working_since: None,
             worked: None,
+            worked_by: BTreeSet::new(),
             limit_seen: None,
             asks_seen: Vec::new(),
             prev_lid: None,
@@ -366,7 +370,9 @@ pub fn tick(app: &AppHandle, shared: &Shared) {
         if claude.active && !core.claude_active {
             core.working_since = Some(Instant::now());
             core.worked = None;
+            core.worked_by.clear();
         }
+        core.worked_by.extend(&claude.working);
         if went_idle {
             core.worked = core.working_since.map(|t| t.elapsed());
         }
@@ -422,7 +428,7 @@ pub fn tick(app: &AppHandle, shared: &Shared) {
                         if !limit_pending && worked_long(core.worked.take()) {
                             notes.push((
                                 Alert::Done,
-                                "Claude is done".into(),
+                                done_title(&core.worked_by),
                                 "Nothing is left running, so the Mac can sleep now.".into(),
                             ));
                         }
@@ -443,7 +449,7 @@ pub fn tick(app: &AppHandle, shared: &Shared) {
         if went_idle && !released_for_idle && !waiting && !limit_pending && worked_long(core.worked.take()) {
             notes.push((
                 Alert::Done,
-                "Claude is done".into(),
+                done_title(&core.worked_by),
                 "Nothing is left running.".into(),
             ));
         }
@@ -639,25 +645,45 @@ fn ask_note(fresh: &[&Ask]) -> Option<Note> {
     let first = fresh.first()?;
     let n = fresh.len();
     let same = fresh.iter().all(|a| a.turn == first.turn);
+    let (who, many) = who(&fresh.iter().map(|a| a.agent).collect());
+    let (needs, is) = if many { ("need", "are") } else { ("needs", "is") };
     Some(match (first.turn, same, n) {
         (Turn::Approval, true, 1) => (
             Alert::Asks,
-            "Claude needs your approval".into(),
+            format!("{who} {needs} your approval"),
             "A session is waiting for you to allow a file change. It can't go on until you do.".into(),
         ),
         (Turn::Approval, true, _) => (
             Alert::Asks,
-            "Claude needs your approval".into(),
+            format!("{who} {needs} your approval"),
             format!("{n} sessions are waiting for you to allow a file change."),
         ),
         (_, true, 1) => (
             Alert::Asks,
-            "Claude is asking you something".into(),
+            format!("{who} {is} asking you something"),
             "A session is waiting for your answer. It can't go on until you reply.".into(),
         ),
-        (_, true, _) => (Alert::Asks, "Claude is asking you something".into(), format!("{n} sessions are waiting for your answer.")),
-        _ => (Alert::Asks, "Claude needs you".into(), format!("{n} sessions are waiting for your answer or approval.")),
+        (_, true, _) => (Alert::Asks, format!("{who} {is} asking you something"), format!("{n} sessions are waiting for your answer.")),
+        _ => (Alert::Asks, format!("{who} {needs} you"), format!("{n} sessions are waiting for your answer or approval.")),
     })
+}
+
+/// "Claude is done", or whichever agents worked.
+fn done_title(worked_by: &BTreeSet<Agent>) -> String {
+    let (who, many) = who(worked_by);
+    format!("{who} {} done", if many { "are" } else { "is" })
+}
+
+/// "Claude", "Claude and Codex" or "Claude, Codex and Cursor", and whether
+/// that's more than one. Claude when none is known.
+fn who(agents: &BTreeSet<Agent>) -> (String, bool) {
+    let names: Vec<&str> = agents.iter().map(|a| a.name()).collect();
+    let text = match names.as_slice() {
+        [] => "Claude".to_string(),
+        [one] => one.to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    };
+    (text, names.len() > 1)
 }
 
 /// What to log and notify when the usage-limit picture changes.
@@ -876,12 +902,23 @@ mod tests {
 
     #[test]
     fn ask_notes() {
-        let ask = |turn| Ask { session: PathBuf::from("/s.jsonl"), turn, since: std::time::SystemTime::now() };
-        let (q, a) = (ask(Turn::Question), ask(Turn::Approval));
+        let ask = |turn, agent| Ask { session: PathBuf::from("/s.jsonl"), agent, turn, since: std::time::SystemTime::now() };
+        let (q, a) = (ask(Turn::Question, Agent::Claude), ask(Turn::Approval, Agent::Claude));
         assert!(ask_note(&[]).is_none());
         assert_eq!(ask_note(&[&q]).unwrap().1, "Claude is asking you something");
         assert!(ask_note(&[&a, &a]).unwrap().2.starts_with("2 sessions"));
         assert_eq!(ask_note(&[&q, &a]).unwrap(), (Alert::Asks, "Claude needs you".into(), "2 sessions are waiting for your answer or approval.".into()));
+        let codex = ask(Turn::Question, Agent::Codex);
+        assert_eq!(ask_note(&[&codex]).unwrap().1, "Codex is asking you something");
+        assert_eq!(ask_note(&[&q, &codex]).unwrap().1, "Claude and Codex are asking you something");
+    }
+
+    #[test]
+    fn done_names_who_worked() {
+        let set = |agents: &[Agent]| agents.iter().copied().collect::<BTreeSet<_>>();
+        assert_eq!(done_title(&set(&[])), "Claude is done");
+        assert_eq!(done_title(&set(&[Agent::Cursor])), "Cursor is done");
+        assert_eq!(done_title(&set(&[Agent::Cursor, Agent::Claude, Agent::Codex])), "Claude, Codex and Cursor are done");
     }
 
     fn limited(state: LimitState, resets_at: Option<DateTime<Local>>) -> ClaudeInfo {
