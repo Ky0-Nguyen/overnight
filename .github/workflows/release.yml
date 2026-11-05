@@ -1,9 +1,9 @@
 # Every push to main that changes the app (a merged pull request or a direct
 # push) makes a release: the version is bumped and committed back, the commit
-# is tagged, the app is built for Apple silicon and Intel, and the zip is
-# published on the Releases page. Docs-only and README-only changes don't
-# release. Put [minor] or [major] in a commit message for a bigger bump, or
-# [skip release] to skip one.
+# is tagged, the app is built for Apple silicon and Intel, signed and
+# notarized, and the zip is published on the Releases page. Docs-only and
+# README-only changes don't release. Put [minor] or [major] in a commit message
+# for a bigger bump, or [skip release] to skip one.
 
 name: Release
 
@@ -27,6 +27,10 @@ jobs:
   release:
     if: ${{ !contains(github.event.head_commit.message, '[skip release]') }}
     runs-on: macos-latest
+    env:
+      # True once the Apple signing secrets are set (see CONTRIBUTING.md).
+      # Until then the app is ad-hoc signed and isn't notarized.
+      NOTARIZE: ${{ secrets.APPLE_CERTIFICATE != '' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -59,9 +63,30 @@ jobs:
       # The key signs Overnight.app.tar.gz, which the app's updater checks
       # against the public key in tauri.conf.json before installing it.
       - name: Build the universal app
+        if: env.NOTARIZE != 'true'
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run tauri -- build --target universal-apple-darwin --bundles app
+
+      # Tauri imports the certificate into a temporary keychain, signs the app
+      # with it, sends it to Apple to notarize and staples the ticket, then
+      # makes the updater archive from the notarized app. A missing secret
+      # fails the build instead of shipping an app that isn't notarized.
+      - name: Build, sign and notarize the universal app
+        if: env.NOTARIZE == 'true'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          # Overrides the ad-hoc "-" in tauri.conf.json. Tauri checks that the
+          # certificate's name contains it, so any other kind of certificate
+          # fails the build.
+          APPLE_SIGNING_IDENTITY: Developer ID Application
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: npm run tauri -- build --target universal-apple-darwin --bundles app
 
       - name: Package
@@ -71,6 +96,10 @@ jobs:
           bundle=src-tauri/target/universal-apple-darwin/release/bundle/macos
           app="$bundle/Overnight.app"
           codesign --verify --deep --strict "$app"
+          if [ "$NOTARIZE" = true ]; then
+            xcrun stapler validate "$app"
+            spctl --assess --type execute --verbose "$app"
+          fi
           lipo -archs "$app/Contents/MacOS/overnight"
           ditto -c -k --keepParent "$app" Overnight-macos.zip
           # What the app's updater reads from releases/latest. The app is
@@ -111,8 +140,10 @@ jobs:
             echo
             echo "Download **Overnight-macos.zip**, open it, and move Overnight to your Applications folder. It runs on macOS 12 or later, on Apple silicon and Intel Macs."
             echo
-            echo "Overnight isn't notarized by Apple yet, so the first time you open it macOS says it can't check it for malicious software. Open System Settings, go to Privacy & Security, and click Open Anyway next to Overnight. On macOS 14 and earlier you can instead Control-click the app and choose Open."
-            echo
+            if [ "$NOTARIZE" != true ]; then
+              echo "Overnight isn't notarized by Apple yet, so the first time you open it macOS says it can't check it for malicious software. Open System Settings, go to Privacy & Security, and click Open Anyway next to Overnight. On macOS 14 and earlier you can instead Control-click the app and choose Open."
+              echo
+            fi
             echo "## Changes"
             echo
             if [ -n "$PREVIOUS" ]; then
